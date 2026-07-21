@@ -8,9 +8,19 @@ on:
         required: true
         default: true
         type: boolean
+      edition_mode:
+        description: Edition to generate
+        required: true
+        default: preopen
+        type: choice
+        options:
+          - preopen
+          - intraday
   schedule:
-    - cron: "40 6 * * *"
-      timezone: "Asia/Hong_Kong"
+    # GitHub cron is expressed in UTC. Hong Kong does not observe DST.
+    - cron: "40 22 * * *" # 06:40 HKT
+    - cron: "52 22 * * *" # 06:52 HKT retry
+    - cron: "4 23 * * *"  # 07:04 HKT final retry
 
 permissions:
   contents: write
@@ -24,40 +34,74 @@ concurrency:
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+      - name: Sync latest published state
+        run: git pull --ff-only origin "${GITHUB_REF_NAME}"
       - name: Check HK trading day
         id: calendar
         run: python scripts/trading_calendar.py
+      - name: Check whether today's memo is already current
+        id: freshness
+        shell: bash
+        run: |
+          memo_date="$(TZ=Asia/Hong_Kong date +%F)"
+          expected_title="Morning Market Memo | $(TZ=Asia/Hong_Kong date '+%d %b %Y') | HK/China Pre-Open"
+          if [[ -f "memos/memo-${memo_date}.md" ]] && grep -Fqx "$expected_title" "memos/memo-${memo_date}.md"; then
+            echo "already_current=true" >> "$GITHUB_OUTPUT"
+            echo "A pre-open memo for ${memo_date} already exists; the scheduled retry will stop."
+          else
+            echo "already_current=false" >> "$GITHUB_OUTPUT"
+            echo "No current pre-open memo for ${memo_date}; generation is required."
+          fi
+      - name: Decide whether this run should publish
+        id: publish
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "required=true" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ steps.calendar.outputs.is_trading_day }}" == "true" && "${{ steps.freshness.outputs.already_current }}" != "true" ]]; then
+            echo "required=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "required=false" >> "$GITHUB_OUTPUT"
+            echo "No generation or deployment is required for this scheduled retry."
+          fi
       - uses: actions/setup-python@v5
+        if: steps.publish.outputs.required == 'true'
         with:
           python-version: "3.12"
           cache: pip
-      - run: pip install -r requirements.txt
+      - if: steps.publish.outputs.required == 'true'
+        run: pip install -r requirements.txt
       - name: Generate and validate memo
-        if: inputs.generate || (github.event_name == 'schedule' && steps.calendar.outputs.is_trading_day == 'true')
+        if: steps.publish.outputs.required == 'true' && (inputs.generate == true || github.event_name == 'schedule')
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_MODEL: gpt-5.6-sol
-          EDITION_MODE: ${{ github.event_name == 'workflow_dispatch' && 'intraday' || 'preopen' }}
+          EDITION_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.edition_mode || 'preopen' }}
         run: python scripts/generate_memo.py
       - name: Build public site
+        if: steps.publish.outputs.required == 'true'
         run: python scripts/build_site.py
       - name: Save successful memo
-        if: inputs.generate || (github.event_name == 'schedule' && steps.calendar.outputs.is_trading_day == 'true')
+        if: steps.publish.outputs.required == 'true' && (inputs.generate == true || github.event_name == 'schedule')
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add memos docs
-          git diff --cached --quiet || git commit -m "memo: $(date -u +%F)"
+          git diff --cached --quiet || git commit -m "memo: $(TZ=Asia/Hong_Kong date +%F)"
           git push
       - uses: actions/configure-pages@v5
+        if: steps.publish.outputs.required == 'true'
       - uses: actions/upload-pages-artifact@v3
+        if: steps.publish.outputs.required == 'true'
         with:
           path: docs
       - name: Deploy GitHub Pages
+        if: steps.publish.outputs.required == 'true'
         id: deployment
         uses: actions/deploy-pages@v4
