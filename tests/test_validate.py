@@ -25,6 +25,13 @@ class MemoValidationTest(unittest.TestCase):
         memo = "Morning Market Memo | 21 Jul 2026 | HK/China Pre-Open\n(covers 20 Jul 16:00 HKT close → 21 Jul 12:15 HKT research cutoff)\n" + bullets
         self.assertIn("Research cutoff must be before the 09:30 HKT market open", validate(memo, "memo-2026-07-21.md"))
 
+    def test_accepts_truthfully_labelled_intraday_preview(self):
+        bullets = "\n".join(
+            f"- Item {i}: Confirmed news. [[Source](https://example.com/{i})]" for i in range(8)
+        )
+        memo = "Intraday Market Memo | 21 Jul 2026 | HK/China Update\n(covers 20 Jul 16:00 HKT close → 21 Jul 13:30 HKT research cutoff)\n" + bullets
+        self.assertEqual(validate(memo, "memo-2026-07-21.md", edition_mode="intraday"), [])
+
 
 if __name__ == "__main__":
     unittest.main()

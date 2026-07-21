@@ -32,7 +32,8 @@ def page(title: str, window: str, bullets: list[str], memos: list[Path], prefix:
     items = "".join(f'<li><span class="num">{i:02d}</span><p>{inline(item)}</p></li>' for i, item in enumerate(bullets, 1))
     links = "".join(f'<a href="{prefix}archive/{memo.stem}.html">{memo.stem[5:]}</a>' for memo in reversed(memos))
     updated = datetime.now(timezone(timedelta(hours=8))).strftime("%d %b %Y %H:%M HKT")
-    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>{html.escape(title)}</title><style>{CSS}</style></head><body><main class="wrap"><header class="brand">HK / China Pre-Market Memo</header><div class="eyebrow">Latest verified edition</div><h1>{html.escape(title)}</h1><p class="window">{html.escape(window)}</p><ol class="memo">{items}</ol><p class="stamp">Updated {updated}</p><nav class="archive" aria-label="Memo archive"><b>Archive</b><br>{links}</nav><p class="disclaimer">Compiled from public sources. Informational only — not investment advice.</p></main></body></html>'''
+    eyebrow = "Verified intraday preview" if title.startswith("Intraday Market Memo") else "Latest verified edition"
+    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>{html.escape(title)}</title><style>{CSS}</style></head><body><main class="wrap"><header class="brand">HK / China Market Memo</header><div class="eyebrow">{eyebrow}</div><h1>{html.escape(title)}</h1><p class="window">{html.escape(window)}</p><ol class="memo">{items}</ol><p class="stamp">Updated {updated}</p><nav class="archive" aria-label="Memo archive"><b>Archive</b><br>{links}</nav><p class="disclaimer">Compiled from public sources. Informational only — not investment advice.</p></main></body></html>'''
 
 
 def main() -> None:
