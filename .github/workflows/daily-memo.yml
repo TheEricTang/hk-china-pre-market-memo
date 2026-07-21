@@ -9,7 +9,7 @@ on:
         default: true
         type: boolean
   schedule:
-    - cron: "10 6 * * *"
+    - cron: "40 6 * * *"
       timezone: "Asia/Hong_Kong"
 
 permissions:
@@ -29,13 +29,16 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+      - name: Check HK trading day
+        id: calendar
+        run: python scripts/trading_calendar.py
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements.txt
       - name: Generate and validate memo
-        if: github.event_name == 'schedule' || inputs.generate
+        if: inputs.generate || (github.event_name == 'schedule' && steps.calendar.outputs.is_trading_day == 'true')
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_MODEL: gpt-5.6-sol
@@ -44,7 +47,7 @@ jobs:
       - name: Build public site
         run: python scripts/build_site.py
       - name: Save successful memo
-        if: github.event_name == 'schedule' || inputs.generate
+        if: inputs.generate || (github.event_name == 'schedule' && steps.calendar.outputs.is_trading_day == 'true')
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
