@@ -1,0 +1,31 @@
+import re
+from pathlib import Path
+
+FILE_RE = re.compile(r"^memo-\d{4}-\d{2}-\d{2}\.md$")
+TITLE_RE = re.compile(r"^Morning Market Memo \| \d{2} [A-Z][a-z]{2} \d{4} \| HK/China Pre-Open$")
+LINK_RE = re.compile(r"\[\[[^\]]+\]\(https?://[^)\s]+\)\]")
+
+
+def validate(markdown: str, filename: str) -> list[str]:
+    errors: list[str] = []
+    lines = [line.strip() for line in markdown.splitlines() if line.strip()]
+    if not FILE_RE.match(filename):
+        errors.append("Filename must be memo-YYYY-MM-DD.md")
+    if not lines or not TITLE_RE.match(lines[0]):
+        errors.append("Invalid memo title")
+    if len(lines) < 2 or not lines[1].startswith("(covers ") or "research cutoff)" not in lines[1]:
+        errors.append("Coverage line must state the actual HKT research cutoff")
+    bullets = [line for line in lines[2:] if line.startswith("- ")]
+    if len(bullets) < 8:
+        errors.append("Memo needs at least 8 verified bullets")
+    for number, bullet in enumerate(bullets, 1):
+        if not LINK_RE.search(bullet):
+            errors.append(f"Bullet {number} has no specific source link")
+    return errors
+
+
+def validate_file(path: Path) -> None:
+    errors = validate(path.read_text(encoding="utf-8"), path.name)
+    if errors:
+        raise ValueError("\n".join(errors))
+
