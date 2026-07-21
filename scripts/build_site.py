@@ -40,6 +40,10 @@ def main() -> None:
     if not memos:
         raise SystemExit("No memos found")
     ARCHIVE.mkdir(parents=True, exist_ok=True)
+    valid_pages = {f"{memo.stem}.html" for memo in memos}
+    for stale in ARCHIVE.glob("memo-????-??-??.html"):
+        if stale.name not in valid_pages:
+            stale.unlink()
     for memo in memos:
         title, window, bullets = parse(memo)
         (ARCHIVE / f"{memo.stem}.html").write_text(page(title, window, bullets, memos, "../"), encoding="utf-8")
@@ -52,4 +56,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

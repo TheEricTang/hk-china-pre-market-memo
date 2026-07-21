@@ -1,4 +1,5 @@
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -38,9 +39,15 @@ Return only the finished Markdown memo. Do not include analysis, a preface, code
         max_output_tokens=14000,
         store=False,
     )
+    markdown = response.output_text.strip()
+    markdown = re.sub(
+        r"\s*\(\[[^\]]+\]\(https?://[^\s)]+\)\)\s*(?=\[\[)",
+        " ",
+        markdown,
+    )
     candidate = ROOT / "memos" / f".{filename}.candidate"
     candidate.parent.mkdir(parents=True, exist_ok=True)
-    candidate.write_text(response.output_text.strip() + "\n", encoding="utf-8")
+    candidate.write_text(markdown + "\n", encoding="utf-8")
     errors = validate(candidate.read_text(encoding="utf-8"), filename)
     if errors:
         raise ValueError("\n".join(errors))

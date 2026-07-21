@@ -15,12 +15,18 @@ def validate(markdown: str, filename: str) -> list[str]:
         errors.append("Invalid memo title")
     if len(lines) < 2 or not lines[1].startswith("(covers ") or "research cutoff)" not in lines[1]:
         errors.append("Coverage line must state the actual HKT research cutoff")
+    elif match := re.search(r"(\d{2}):(\d{2}) HKT research cutoff", lines[1]):
+        cutoff_minutes = int(match.group(1)) * 60 + int(match.group(2))
+        if cutoff_minutes >= 9 * 60 + 30:
+            errors.append("Research cutoff must be before the 09:30 HKT market open")
     bullets = [line for line in lines[2:] if line.startswith("- ")]
     if len(bullets) < 8:
         errors.append("Memo needs at least 8 verified bullets")
     for number, bullet in enumerate(bullets, 1):
         if not LINK_RE.search(bullet):
             errors.append(f"Bullet {number} has no specific source link")
+        if re.search(r"\(\[[^\]]+\]\(https?://", bullet):
+            errors.append(f"Bullet {number} contains a duplicate inline citation")
     return errors
 
 
@@ -28,4 +34,3 @@ def validate_file(path: Path) -> None:
     errors = validate(path.read_text(encoding="utf-8"), path.name)
     if errors:
         raise ValueError("\n".join(errors))
-
