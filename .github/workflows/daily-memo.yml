@@ -1,6 +1,14 @@
 name: Daily HK China memo
 
 on:
+  # Re-saving this workflow on main is an explicit recovery trigger. The path
+  # filter prevents the memo commit below from starting a second run.
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/daily-memo.yml
+      - .github/memo-kick.txt
   workflow_dispatch:
     inputs:
       generate:
@@ -78,7 +86,7 @@ jobs:
       - if: steps.publish.outputs.required == 'true'
         run: pip install -r requirements.txt
       - name: Generate and validate memo
-        if: steps.publish.outputs.required == 'true' && (inputs.generate == true || github.event_name == 'schedule')
+        if: steps.publish.outputs.required == 'true' && (inputs.generate == true || github.event_name == 'schedule' || github.event_name == 'push')
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_MODEL: gpt-5.6-sol
@@ -88,7 +96,7 @@ jobs:
         if: steps.publish.outputs.required == 'true'
         run: python scripts/build_site.py
       - name: Save successful memo
-        if: steps.publish.outputs.required == 'true' && (inputs.generate == true || github.event_name == 'schedule')
+        if: steps.publish.outputs.required == 'true' && (inputs.generate == true || github.event_name == 'schedule' || github.event_name == 'push')
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
