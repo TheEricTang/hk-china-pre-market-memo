@@ -59,7 +59,7 @@ jobs:
         run: |
           memo_date="$(TZ=Asia/Hong_Kong date +%F)"
           expected_title="Morning Market Memo | $(TZ=Asia/Hong_Kong date '+%d %b %Y') | HK/China Pre-Open"
-          if [[ -f "memos/memo-${memo_date}.md" ]] && grep -Fqx "$expected_title" "memos/memo-${memo_date}.md"; then
+          if python scripts/memo_freshness.py "memos/memo-${memo_date}.md" "$expected_title"; then
             echo "already_current=true" >> "$GITHUB_OUTPUT"
             echo "A pre-open memo for ${memo_date} already exists; the scheduled retry will stop."
           else
