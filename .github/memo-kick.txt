@@ -4,4 +4,4 @@ If all scheduled GitHub Actions retries fail to start, update the date below
 and push to main. The workflow's path-filtered push trigger will generate and
 publish the missing edition without creating a recursive run.
 
-Last recovery trigger: 2026-07-23 HKT
+Last recovery trigger: 2026-07-23 HKT — automated live test 10:45 HKT
