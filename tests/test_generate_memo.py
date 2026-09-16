@@ -65,7 +65,7 @@ class GenerateMemoTest(unittest.TestCase):
             "editorial_issues": [],
         }
 
-    def transport(self, outcomes, error_code=None, audit_status="completed", audit_reason=None, draft_sources=True, audit_sources=True, discovery_inventory=None, discovery_sources=True):
+    def transport(self, outcomes, error_code=None, audit_status="completed", audit_reason=None, draft_sources=True, audit_sources=True, discovery_inventory=None, discovery_sources=True, lead_dispositions=None):
         def handle(request):
             self.requests.append(request)
             payload = json.loads(request.content)
@@ -91,6 +91,8 @@ class GenerateMemoTest(unittest.TestCase):
                                         for local, global_id in enumerate(ids)]}
                 else:
                     result = {key: complete[key] for key in ("coverage", "editorial_issues")}
+                    if "lead_dispositions" in schema_keys:
+                        result["lead_dispositions"] = lead_dispositions or []
                 text = json.dumps(result)
             else:
                 text = self.memo
@@ -388,7 +390,10 @@ class GenerateMemoTest(unittest.TestCase):
         inventory = {key: self.audit()[key] for key in ("coverage", "editorial_issues")}
         inventory["coverage"][0]["missing_material_stories"] = [
             "Confirmed material overnight catalyst, https://example.com/0, announced before cutoff"]
-        self.transport([200], discovery_inventory=inventory)
+        disposition = {"lead_id": "overnight_markets:1", "decision": "covered", "bullet": 1,
+                       "exclusion_reason": "none", "reason": "The same verified material catalyst appears in retained bullet one.",
+                       "source_urls": ["https://example.com/0"], "news_time": "2026-09-15T05:00:00+08:00"}
+        self.transport([200], discovery_inventory=inventory, lead_dispositions=[disposition])
         generate_memo.main()
         discovery = json.loads(self.requests[0].content)
         draft = json.loads(self.requests[1].content)
@@ -397,6 +402,10 @@ class GenerateMemoTest(unittest.TestCase):
         self.assertIn("Confirmed material overnight catalyst", draft["input"])
         self.assertIn("mandatory independent post-draft audit", draft["input"])
         self.assertEqual(len(self.requests[2:]), 4)
+        final_coverage = next(json.loads(request.content) for request in self.requests[2:]
+                              if "lead_dispositions" in json.loads(request.content)["text"]["format"]["schema"]["properties"])
+        self.assertIn('"lead_id": "overnight_markets:1"', final_coverage["input"])
+        self.assertIn("Confirmed material overnight catalyst", final_coverage["input"])
         artifact = json.loads((self.root / "artifacts/memo-audit.json").read_text())
         self.assertEqual(artifact["discovery"]["inventory"], inventory)
         self.assertTrue(artifact["passed"])
@@ -451,6 +460,14 @@ class GenerateMemoTest(unittest.TestCase):
         self.assertIsNone(saved[0]["url"])
         self.assertEqual(set(saved[1]), {"type", "url", "sources"})
         self.assertNotIn("private-value", json.dumps(saved))
+
+    def test_discovered_material_lead_cannot_silently_disappear_from_final_review(self):
+        inventory = {key: self.audit()[key] for key in ("coverage", "editorial_issues")}
+        inventory["coverage"][0]["missing_material_stories"] = ["A verified material catalyst to reconcile"]
+        self.transport([200, 200, 200], discovery_inventory=inventory)
+        with self.assertRaisesRegex(ValueError, "Every discovered lead requires exactly one"):
+            generate_memo.main()
+        self.assertEqual(self.destination.read_text(), "Previous valid edition\n")
 
 
 if __name__ == "__main__":

@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import generate_memo
-from quality_audit import FACTS_AUDIT_SCHEMA, COVERAGE_AUDIT_SCHEMA
+from quality_audit import FACTS_AUDIT_SCHEMA, FINAL_COVERAGE_AUDIT_SCHEMA
 
 
 class ParallelAuditTest(unittest.TestCase):
@@ -23,8 +23,8 @@ class ParallelAuditTest(unittest.TestCase):
         self.recorded = []
 
     def response(self, instruction, schema):
-        if schema == COVERAGE_AUDIT_SCHEMA:
-            body = {'coverage': [], 'editorial_issues': []}
+        if schema == FINAL_COVERAGE_AUDIT_SCHEMA:
+            body = {'coverage': [], 'editorial_issues': [], 'lead_dispositions': []}
             ids = []
         else:
             self.assertEqual(schema, FACTS_AUDIT_SCHEMA)

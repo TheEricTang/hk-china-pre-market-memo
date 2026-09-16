@@ -5,10 +5,17 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from quality_audit import COVERAGE_AREAS, normalized_query, opened_urls, retrieved_queries, timestamp_bounds, completed_web_actions, retrieved_urls, validate_audit
+from quality_audit import COVERAGE_AREAS, normalized_url, normalized_query, opened_urls, retrieved_queries, timestamp_bounds, completed_web_actions, discovery_leads, validate_lead_dispositions, retrieved_urls, validate_audit
 
 
 class QualityAuditTest(unittest.TestCase):
+    def test_verified_boe_tracking_alias_matches_without_discarding_content_parameters(self):
+        base = "https://www.bankofengland.co.uk/events/upcoming-events"
+        self.assertEqual(normalized_url(base + "?trk=public_post_comment-text"), base)
+        self.assertNotEqual(normalized_url(base + "?date=2026-09-16&trk=public_post_comment-text"), base)
+        other = "https://example.com/events/upcoming-events?trk=public_post_comment-text"
+        self.assertEqual(normalized_url(other), other)
+
     def setUp(self):
         self.start = datetime.fromisoformat("2026-09-14T16:00:00+08:00")
         self.cutoff = datetime.fromisoformat("2026-09-15T06:40:00+08:00")
@@ -235,6 +242,50 @@ class QualityAuditTest(unittest.TestCase):
             {"type": "web_search_call", "status": "failed", "action": {"type": "open_page", "url": "https://example.com/fail"}},
         ]}
         self.assertEqual(completed_web_actions(response), [{"type": "open_page", "url": None, "sources": []}])
+
+
+class LeadDispositionTest(unittest.TestCase):
+    def setUp(self):
+        self.inventory = {"coverage": [{"area": "china_hk_policy", "missing_material_stories": ["A discovered policy announcement"]}]}
+        self.start = datetime.fromisoformat("2026-09-14T16:00:00+08:00")
+        self.cutoff = datetime.fromisoformat("2026-09-15T06:40:00+08:00")
+        self.proof = {"https://example.com/notice"}
+        self.disposition = {"lead_id": "china_hk_policy:1", "decision": "excluded", "bullet": 0,
+                            "exclusion_reason": "not_material", "news_time": "",
+                            "reason": "Official notice confirms a routine administrative correction with no changed policy, eligibility or amounts.",
+                            "source_urls": ["https://example.com/notice"]}
+
+    def check(self, dispositions):
+        return validate_lead_dispositions(dispositions, self.inventory, ["retained bullet"], self.proof, self.start, self.cutoff)
+
+    def test_stable_ids_and_exact_disposition_coverage(self):
+        self.assertEqual(discovery_leads(self.inventory)[0]["lead_id"], "china_hk_policy:1")
+        self.assertTrue(self.check([]))
+        self.assertTrue(self.check([self.disposition, self.disposition]))
+        self.assertTrue(self.check([{**self.disposition, "lead_id": "china_hk_policy:2"}]))
+
+    def test_supported_materiality_exclusion_does_not_require_filler(self):
+        self.assertEqual(self.check([self.disposition]), [])
+        self.assertTrue(self.check([{**self.disposition, "source_urls": ["https://unretrieved.example/notice"]}]))
+        self.assertTrue(self.check([{**self.disposition, "reason": "not relevant"}]))
+
+    def test_covered_or_duplicate_disposition_must_point_to_retained_bullet(self):
+        covered = {**self.disposition, "decision": "covered", "exclusion_reason": "none", "bullet": 1}
+        self.assertEqual(self.check([covered]), [])
+        self.assertTrue(self.check([{**covered, "bullet": 2}]))
+        duplicate = {**self.disposition, "exclusion_reason": "duplicate", "bullet": 1}
+        self.assertEqual(self.check([duplicate]), [])
+        self.assertTrue(self.check([{**duplicate, "bullet": 0}]))
+
+    def test_outside_window_exclusion_requires_unambiguous_time_evidence(self):
+        old = {**self.disposition, "exclusion_reason": "outside_window", "news_time": "2026-09-01"}
+        self.assertEqual(self.check([old]), [])
+        for value in ("", "2026-09-15T05:00:00+08:00", "2026-09-14@+08:00"):
+            self.assertTrue(self.check([{**old, "news_time": value}]))
+
+    def test_confirmed_missing_lead_is_always_blocking(self):
+        self.assertTrue(any("confirmed material discovery lead is missing" in error for error in self.check([
+            {**self.disposition, "decision": "missing", "exclusion_reason": "none"}])) )
 
 
 if __name__ == "__main__":

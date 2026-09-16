@@ -13,7 +13,7 @@ from openai import APIConnectionError, APIStatusError, OpenAI
 
 from validate_memo import validate
 from trading_calendar import is_hk_trading_day
-from quality_audit import (AUDIT_SCHEMA, FACTS_AUDIT_SCHEMA, COVERAGE_AUDIT_SCHEMA,
+from quality_audit import (AUDIT_SCHEMA, FACTS_AUDIT_SCHEMA, COVERAGE_AUDIT_SCHEMA, FINAL_COVERAGE_AUDIT_SCHEMA,
                            facts_audit_instruction, coverage_audit_instruction,
                            COVERAGE_AREAS, has_distinct_queries, normalized_query, completed_web_actions,
                            normalized_url, opened_urls, retrieved_queries, retrieved_urls, validate_audit)
@@ -151,7 +151,7 @@ def request_memo(client: OpenAI, instruction: str, *, audit=False, deadline=None
             time.sleep(delay)
 
 
-def parallel_audit(client, markdown, window_start, cutoff, *, deadline, record_response):
+def parallel_audit(client, markdown, window_start, cutoff, *, deadline, record_response, discovery_inventory=None):
     """Small independent article-check batches and one full-memo coverage search.
 
     All jobs share one deadline. Only this coordinating thread writes artifacts.
@@ -162,12 +162,12 @@ def parallel_audit(client, markdown, window_start, cutoff, *, deadline, record_r
     bullets = [line.strip() for line in markdown.splitlines() if line.strip().startswith("- ")]
     if not bullets:
         raise ValueError("Cannot audit an empty memo")
-    tasks = [("coverage", None, coverage_audit_instruction(markdown, window_start, cutoff), COVERAGE_AUDIT_SCHEMA)]
+    tasks = [("coverage", None, coverage_audit_instruction(markdown, window_start, cutoff, discovery_inventory or {"coverage": []}), FINAL_COVERAGE_AUDIT_SCHEMA)]
     for offset in range(0, len(bullets), AUDIT_BATCH_SIZE):
         batch = bullets[offset:offset + AUDIT_BATCH_SIZE]
         tasks.append((f"facts_{offset + 1}_{offset + len(batch)}", (offset, len(batch)),
                       facts_audit_instruction(batch, window_start, cutoff), FACTS_AUDIT_SCHEMA))
-    audit = {"items": [], "coverage": [], "editorial_issues": []}
+    audit = {"items": [], "coverage": [], "editorial_issues": [], "lead_dispositions": []}
     provenance = {"urls": set(), "queries": set(), "opened": set(), "items": {}, "coverage": {}}
     failures = []
     with ThreadPoolExecutor(max_workers=AUDIT_WORKERS, thread_name_prefix="memo-audit") as pool:
@@ -188,7 +188,7 @@ def parallel_audit(client, markdown, window_start, cutoff, *, deadline, record_r
                     for key in ("urls", "queries", "opened"):
                         provenance[key].update(own[key])
                     if batch is None:
-                        if set(result) != {"coverage", "editorial_issues"}:
+                        if set(result) != {"coverage", "editorial_issues", "lead_dispositions"}:
                             raise ValueError("Coverage audit returned an invalid shape")
                         audit.update(result)
                         provenance["coverage"] = own
@@ -347,11 +347,12 @@ Return only finished Markdown memo. No preface, code fences, or completion note.
                 if not errors:
                     audit, audit_sources = parallel_audit(
                         client, markdown, start, now, deadline=stage_deadline(deadline, AUDIT_STAGE_SECONDS),
-                        record_response=lambda checked, stage: record_usage(checked, f"audit_{attempt + 1}_{stage}"))
+                        record_response=lambda checked, stage: record_usage(checked, f"audit_{attempt + 1}_{stage}"),
+                        discovery_inventory=inventory)
                     errors = validate_audit(audit, markdown, audit_sources["urls"], start, now,
                                             audit_sources["queries"], audit_sources["opened"],
                                             item_provenance=audit_sources["items"],
-                                            coverage_provenance=audit_sources["coverage"])
+                                            coverage_provenance=audit_sources["coverage"], discovery_inventory=inventory)
                 report["checks"].append({"attempt": attempt + 1, "audit": audit, "errors": errors})
                 persist_report()
                 if not errors:
