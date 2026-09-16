@@ -11,6 +11,16 @@ on:
       - .github/memo-kick.txt
   workflow_dispatch:
     inputs:
+      dry_run:
+        description: Generate and review an edition without committing or publishing it
+        required: true
+        default: false
+        type: boolean
+      automatic:
+        description: Respect HK trading days and skip generation of an existing edition
+        required: true
+        default: false
+        type: boolean
       generate:
         description: Generate a new memo before deployment
         required: true
@@ -50,34 +60,12 @@ jobs:
       - uses: actions/checkout@v4
       - name: Sync latest published state
         run: git pull --ff-only origin "${GITHUB_REF_NAME}"
-      - name: Check HK trading day
-        id: calendar
-        run: python scripts/trading_calendar.py
-      - name: Check whether today's memo is already current
-        id: freshness
-        shell: bash
-        run: |
-          memo_date="$(TZ=Asia/Hong_Kong date +%F)"
-          expected_title="Morning Market Memo | $(TZ=Asia/Hong_Kong date '+%d %b %Y') | HK/China Pre-Open"
-          if python scripts/memo_freshness.py "memos/memo-${memo_date}.md" "$expected_title"; then
-            echo "already_current=true" >> "$GITHUB_OUTPUT"
-            echo "A pre-open memo for ${memo_date} already exists; the scheduled retry will stop."
-          else
-            echo "already_current=false" >> "$GITHUB_OUTPUT"
-            echo "No current pre-open memo for ${memo_date}; generation is required."
-          fi
       - name: Decide whether this run should publish
         id: publish
-        shell: bash
-        run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "required=true" >> "$GITHUB_OUTPUT"
-          elif [[ "${{ steps.calendar.outputs.is_trading_day }}" == "true" && "${{ steps.freshness.outputs.already_current }}" != "true" ]]; then
-            echo "required=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "required=false" >> "$GITHUB_OUTPUT"
-            echo "No generation or deployment is required for this scheduled retry."
-          fi
+        env:
+          AUTOMATIC: ${{ inputs.automatic }}
+          GENERATE: ${{ inputs.generate }}
+        run: python scripts/publication_plan.py
       - uses: actions/setup-python@v5
         if: steps.publish.outputs.required == 'true'
         with:
@@ -85,18 +73,33 @@ jobs:
           cache: pip
       - if: steps.publish.outputs.required == 'true'
         run: pip install -r requirements.txt
+      - name: Run regression tests
+        if: steps.publish.outputs.required == 'true'
+        run: |
+          python -m unittest discover -s tests -v
+          node --test scheduler/worker.test.mjs
+      - name: Recheck generation deadline after setup
+        if: steps.publish.outputs.generate_required == 'true'
+        env:
+          AUTOMATIC: ${{ inputs.automatic }}
+          GENERATE: ${{ inputs.generate }}
+        run: python scripts/publication_plan.py
       - name: Generate and validate memo
-        if: steps.publish.outputs.required == 'true' && (inputs.generate == true || github.event_name == 'schedule' || github.event_name == 'push')
+        if: steps.publish.outputs.generate_required == 'true'
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_MODEL: gpt-5.6-sol
-          EDITION_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.edition_mode || 'preopen' }}
+          EDITION_MODE: ${{ github.event_name == 'workflow_dispatch' && !inputs.automatic && inputs.edition_mode || 'preopen' }}
+          MEMO_VALIDATE_ONLY: ${{ inputs.dry_run && 'true' || 'false' }}
         run: python scripts/generate_memo.py
       - name: Build public site
-        if: steps.publish.outputs.required == 'true'
+        if: steps.publish.outputs.required == 'true' && !inputs.dry_run
         run: python scripts/build_site.py
+      - name: Check approved edition before publication
+        if: steps.publish.outputs.required == 'true' && !inputs.dry_run
+        run: python scripts/verify_publication.py --local-only
       - name: Save successful memo
-        if: steps.publish.outputs.required == 'true' && (inputs.generate == true || github.event_name == 'schedule' || github.event_name == 'push')
+        if: steps.publish.outputs.generate_required == 'true' && !inputs.dry_run
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -104,12 +107,29 @@ jobs:
           git diff --cached --quiet || git commit -m "memo: $(TZ=Asia/Hong_Kong date +%F)"
           git push
       - uses: actions/configure-pages@v5
-        if: steps.publish.outputs.required == 'true'
+        if: steps.publish.outputs.required == 'true' && !inputs.dry_run
       - uses: actions/upload-pages-artifact@v3
-        if: steps.publish.outputs.required == 'true'
+        if: steps.publish.outputs.required == 'true' && !inputs.dry_run
         with:
           path: docs
       - name: Deploy GitHub Pages
-        if: steps.publish.outputs.required == 'true'
+        if: steps.publish.outputs.required == 'true' && !inputs.dry_run
         id: deployment
         uses: actions/deploy-pages@v4
+      - name: Verify live public edition and quality receipt
+        if: steps.publish.outputs.required == 'true' && !inputs.dry_run
+        run: python scripts/verify_publication.py
+      - name: Record dry-run outcome
+        if: inputs.dry_run && steps.publish.outputs.generate_required == 'true' && success()
+        run: echo "Dry run completed; candidate passed independent review. No changes committed or published." >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve generation audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: memo-audit-${{ github.run_id }}-${{ github.run_attempt }}
+          # Contains public-source audit metadata only; public repo readers can download it.
+          path: |
+            artifacts/memo-audit.json
+            artifacts/memo-candidate.md
+          if-no-files-found: ignore
+          retention-days: 14

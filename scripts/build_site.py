@@ -5,6 +5,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from trading_calendar import HKEX_HOLIDAYS
+from publication_status import memo_hash, publication_status
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCS = ROOT / "docs"
@@ -66,7 +67,7 @@ def parse(path: Path):
     return title, window, bullets
 
 
-def page(title: str, window: str, bullets: list[str], memos: list[Path], prefix: str = "") -> str:
+def page(title: str, window: str, bullets: list[str], memos: list[Path], prefix: str = "", memo_sha256: str = "") -> str:
     items = "".join(f'<li><span class="num">{i:02d}</span><p>{inline(item)}</p></li>' for i, item in enumerate(bullets, 1))
     links = "".join(f'<a href="{prefix}archive/{memo.stem}.html">{memo.stem[5:]}</a>' for memo in reversed(memos))
     updated = datetime.now(timezone(timedelta(hours=8))).strftime("%d %b %Y %H:%M HKT")
@@ -74,7 +75,7 @@ def page(title: str, window: str, bullets: list[str], memos: list[Path], prefix:
     holidays = json.dumps({str(year): sorted(days) for year, days in HKEX_HOLIDAYS.items()}, separators=(",", ":"))
     countdown = COUNTDOWN.replace("__MEMO_DATE__", memo_date).replace("__HOLIDAYS__", holidays)
     eyebrow = "Verified intraday preview" if title.startswith("Intraday Market Memo") else "Latest verified edition"
-    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>{html.escape(title)}</title><style>{CSS}</style></head><body><main class="wrap"><header class="brand">HK / China Market Memo</header><div class="eyebrow">{eyebrow}</div><div class="refresh-status" role="status" aria-live="polite">Next refresh in …</div><h1>{html.escape(title)}</h1><p class="window">{html.escape(window)}</p><ol class="memo">{items}</ol><p class="stamp">Updated {updated}</p><nav class="archive" aria-label="Memo archive"><b>Archive</b><br>{links}</nav><p class="disclaimer">Compiled from public sources. Informational only — not investment advice.</p></main>{countdown}</body></html>'''
+    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><meta name="memo-sha256" content="{html.escape(memo_sha256)}"><title>{html.escape(title)}</title><style>{CSS}</style></head><body><main class="wrap"><header class="brand">HK / China Market Memo</header><div class="eyebrow">{eyebrow}</div><div class="refresh-status" role="status" aria-live="polite">Next refresh in …</div><h1>{html.escape(title)}</h1><p class="window">{html.escape(window)}</p><ol class="memo">{items}</ol><p class="stamp">Updated {updated}</p><nav class="archive" aria-label="Memo archive"><b>Archive</b><br>{links}</nav><p class="disclaimer">Compiled from public sources. Informational only — not investment advice.</p></main>{countdown}</body></html>'''
 
 
 def main() -> None:
@@ -88,10 +89,11 @@ def main() -> None:
             stale.unlink()
     for memo in memos:
         title, window, bullets = parse(memo)
-        (ARCHIVE / f"{memo.stem}.html").write_text(page(title, window, bullets, memos, "../"), encoding="utf-8")
+        (ARCHIVE / f"{memo.stem}.html").write_text(page(title, window, bullets, memos, "../", memo_hash(memo)), encoding="utf-8")
     title, window, bullets = parse(memos[-1])
     DOCS.mkdir(exist_ok=True)
-    (DOCS / "index.html").write_text(page(title, window, bullets, memos), encoding="utf-8")
+    (DOCS / "index.html").write_text(page(title, window, bullets, memos, memo_sha256=memo_hash(memos[-1])), encoding="utf-8")
+    (DOCS / "status.json").write_text(json.dumps(publication_status(memos[-1]), indent=2) + "\n", encoding="utf-8")
     (DOCS / ".nojekyll").write_text("", encoding="utf-8")
     print(f"Built site from {memos[-1].name} with {len(memos)} archived memos")
 
