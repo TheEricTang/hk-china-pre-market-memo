@@ -48,14 +48,14 @@ FRESHNESS_SCRIPT = """<script>
     if (tradingDay(today)) {
       const minutes = now.getUTCHours() * 60 + now.getUTCMinutes();
       el.textContent = minutes < 7 * 60 + 30
-        ? `Today's edition is not yet available · Showing ${edition} · Target 07:30 HKT (research begins 06:35 HKT)`
+        ? `Today's edition is not yet available · Showing ${edition} · Target 07:30 HKT`
         : `Today's edition is delayed — showing ${edition} · Target 07:30 HKT`;
       return;
     }
     let next = nextDay(today);
     while (supported(next) && !tradingDay(next)) next = nextDay(next);
     el.textContent = supported(next)
-      ? `Showing ${edition} · Next publication target: ${label(iso(next))}, 07:30 HKT (research begins 06:35 HKT)`
+      ? `Showing ${edition} · Next publication target: ${label(iso(next))}, 07:30 HKT`
       : `Showing ${edition} · Publication calendar needs updating`;
   }
   render();
