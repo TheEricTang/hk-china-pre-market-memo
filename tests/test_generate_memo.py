@@ -61,7 +61,7 @@ class GenerateMemoTest(unittest.TestCase):
             "editorial_issues": [],
         }
 
-    def transport(self, outcomes, error_code=None):
+    def transport(self, outcomes, error_code=None, audit_status="completed", audit_reason=None):
         def handle(request):
             self.requests.append(request)
             is_audit = "text" in json.loads(request.content)
@@ -76,7 +76,10 @@ class GenerateMemoTest(unittest.TestCase):
             text = json.dumps(self.audit()) if is_audit else self.memo
             return httpx.Response(200, json={
                 "id": "resp_test", "object": "response", "created_at": 0,
-                "model": "test", "status": "completed",
+                "model": "test", "status": audit_status if is_audit else "completed",
+                "incomplete_details": {"reason": audit_reason} if is_audit and audit_reason else None,
+                "usage": {"input_tokens": 100, "output_tokens": 32000, "total_tokens": 32100,
+                          "output_tokens_details": {"reasoning_tokens": 28000}} if is_audit else None,
                 "output": [{"id": f"open_{i}", "type": "web_search_call", "status": "completed",
                             "action": {"type": "open_page", "url": f"https://example.com/{i}"}} for i in range(8)] + [{"id": "search_test", "type": "web_search_call", "status": "completed",
                             "action": {"type": "search", "query": "independent query", "sources": [
@@ -240,6 +243,26 @@ class GenerateMemoTest(unittest.TestCase):
         self.assertNotIn("secret", url)
         self.assertNotIn("hidden", url)
         self.assertIn("id=3", url)
+
+    def test_audit_has_larger_output_and_timeout_without_expanding_draft(self):
+        self.transport([200])
+        generate_memo.main()
+        draft, audit = self.requests
+        self.assertEqual(json.loads(draft.content)["max_output_tokens"], 14000)
+        self.assertEqual(json.loads(audit.content)["max_output_tokens"], 32000)
+        self.assertEqual(draft.extensions["timeout"]["read"], 300.0)
+        self.assertGreater(audit.extensions["timeout"]["read"], 590.0)
+        self.assertLessEqual(audit.extensions["timeout"]["read"], 600.0)
+
+    def test_incomplete_audit_keeps_sanitized_reason_and_usage_without_publishing(self):
+        self.transport([200], audit_status="incomplete", audit_reason="max_output_tokens")
+        with self.assertRaisesRegex(generate_memo.IncompleteResponseError, "max_output_tokens"):
+            generate_memo.main()
+        artifact = json.loads((self.root / "artifacts/memo-audit.json").read_text())
+        self.assertEqual(artifact["provider_incomplete"]["reason"], "max_output_tokens")
+        self.assertEqual(artifact["provider_incomplete"]["usage"]["reasoning_tokens"], 28000)
+        self.assertEqual(artifact["usage"][-1]["output_tokens"], 32000)
+        self.assertEqual(self.destination.read_text(), "Previous valid edition\n")
 
 
 if __name__ == "__main__":

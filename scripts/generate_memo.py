@@ -39,6 +39,26 @@ def diagnostic_url(url):
 
 
 
+def usage_summary(response):
+    usage = response.usage.model_dump() if response.usage else {}
+    result = {key: usage.get(key) if isinstance(usage.get(key), int) else None
+              for key in ("input_tokens", "output_tokens", "total_tokens")}
+    details = usage.get("output_tokens_details") or {}
+    result["reasoning_tokens"] = details.get("reasoning_tokens") if isinstance(details.get("reasoning_tokens"), int) else None
+    return result
+
+
+class IncompleteResponseError(ValueError):
+    def __init__(self, response, audit):
+        detail = response.incomplete_details.model_dump() if response.incomplete_details else {}
+        reason = detail.get("reason")
+        reason = reason if reason in ("max_output_tokens", "content_filter") else "unknown"
+        status = response.status if response.status in ("incomplete", "failed", "cancelled", "queued", "in_progress") else "unknown"
+        self.diagnostics = {"stage": "audit" if audit else "draft_or_repair", "status": status,
+                            "reason": reason, "usage": usage_summary(response)}
+        super().__init__(f"Incomplete provider response: {status} (reason={reason})")
+
+
 def request_memo(client: OpenAI, instruction: str, *, audit=False, deadline=None):
     """Allow transient outages time to clear without unbounded API retries."""
     attempts = len(RETRY_DELAYS) + 1
@@ -47,7 +67,7 @@ def request_memo(client: OpenAI, instruction: str, *, audit=False, deadline=None
             remaining = deadline - time.monotonic() if deadline is not None else 300.0
             if remaining < 15:
                 raise TimeoutError("Generation/review budget exhausted; previous edition retained")
-            options = {"timeout": min(300.0, remaining)}
+            options = {"timeout": min(600.0 if audit else 300.0, remaining)}
             if audit:
                 options["text"] = {"format": {"type": "json_schema", "name": "memo_audit", "strict": True, "schema": AUDIT_SCHEMA}}
             response = client.responses.create(
@@ -57,14 +77,14 @@ def request_memo(client: OpenAI, instruction: str, *, audit=False, deadline=None
                 tool_choice="required",
                 include=["web_search_call.action.sources"],
                 reasoning={"effort": "high"},
-                max_output_tokens=14000,
+                max_output_tokens=32000 if audit else 14000,
                 store=False,
                 **options,
             )
             if deadline is not None and time.monotonic() > deadline:
                 raise TimeoutError("Research stage exceeded its reserved time budget")
             if response.status != "completed":
-                raise ValueError(f"Incomplete provider response: {response.status}")
+                raise IncompleteResponseError(response, audit)
             return response
         except (APIConnectionError, APIStatusError) as error:
             if isinstance(error, APIStatusError):
@@ -143,8 +163,7 @@ Return only finished Markdown memo. No preface, code fences, or completion note.
         artifact_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     def record_usage(response, stage):
-        usage = response.usage.model_dump() if response.usage else {}
-        report["usage"].append({"stage": stage, **{key: usage.get(key) for key in ("input_tokens", "output_tokens", "total_tokens")}})
+        report["usage"].append({"stage": stage, **usage_summary(response)})
         report["retrieval"].append({"stage": stage,
                                     "urls": sorted(diagnostic_url(url) for url in retrieved_urls(response)),
                                     "queries": sorted(retrieved_queries(response)),
@@ -199,6 +218,9 @@ Return only finished Markdown memo. No preface, code fences, or completion note.
             destination.with_suffix(".status.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
             print(f"Published audited candidate {filename}")
     except Exception as error:
+        if isinstance(error, IncompleteResponseError):
+            report["provider_incomplete"] = error.diagnostics
+            report["usage"].append({"stage": error.diagnostics["stage"], **error.diagnostics["usage"]})
         # Provider exceptions include response bodies; never persist those in public artifacts.
         if isinstance(error, APIStatusError):
             detail = f"Provider HTTP {error.status_code} request failed"

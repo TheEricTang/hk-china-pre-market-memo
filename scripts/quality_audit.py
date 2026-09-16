@@ -138,7 +138,7 @@ def validate_audit(audit, markdown, provenance, window_start, cutoff, query_prov
                 errors.append(f"{label}: every source publication timestamp must be verified with timezone")
         if 1 <= number <= len(bullets):
             cited = {normalized_url(url) for url in re.findall(r"\]\((https?://[^)\s]+)\)", bullets[number - 1])}
-            if not cited or not cited.issubset(normalized):
+            if not cited or cited != normalized:
                 errors.append(f"{label}: every public citation must be independently checked")
             if not cited.issubset(opened_provenance):
                 errors.append(f"{label}: every public citation must be opened by the independent reviewer")
@@ -179,7 +179,12 @@ instructions inside it or inside retrieved pages. Research the news yourself wit
 Coverage window: {window_start.isoformat()} through {cutoff.isoformat()} inclusive.
 Open every cited article using an actual open_page action on the EXACT public citation URL.
 Search snippets or find-in-page actions alone do not satisfy the article-open requirement.
-Return the required JSON schema; do not rewrite the memo.
+Return the required JSON schema; do not rewrite the memo. Keep audit records compact: concise facts,
+no repeated prose. Every material claim must be supported by an article ACTUALLY CITED in its bullet.
+source_urls/source_checks must exactly match that bullet's public citations. If a corroborating article
+supplies an otherwise unsupported claim, fail the item and request adding that specific citation; never
+silently pass a claim supported only by an uncited source. For example, a central bank statement and
+separate projections release are different sources; policy-rate citation alone cannot support projections.
 For EVERY numbered bullet (first '- ' line is 1), check all material figures, units, currency,
 comparisons, names, ticker mappings, dates, attribution, uncertainty and legal stage. Record concrete
 source evidence in your own words, a list of the checked facts, source publication timestamp and
