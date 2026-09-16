@@ -1,4 +1,6 @@
+import copy
 import io
+import re
 import json
 import sys
 import tempfile
@@ -63,10 +65,11 @@ class GenerateMemoTest(unittest.TestCase):
             "editorial_issues": [],
         }
 
-    def transport(self, outcomes, error_code=None, audit_status="completed", audit_reason=None):
+    def transport(self, outcomes, error_code=None, audit_status="completed", audit_reason=None, draft_sources=True, audit_sources=True):
         def handle(request):
             self.requests.append(request)
-            is_audit = "text" in json.loads(request.content)
+            payload = json.loads(request.content)
+            is_audit = "text" in payload
             outcome = 200 if is_audit else outcomes.pop(0)
             if isinstance(outcome, Exception):
                 raise outcome
@@ -75,7 +78,20 @@ class GenerateMemoTest(unittest.TestCase):
                     "message": "Sensitive error detail must not be logged",
                     "code": error_code or ("server_is_overloaded" if outcome == 503 else "test_error"),
                 }})
-            text = json.dumps(self.audit()) if is_audit else self.memo
+            if is_audit:
+                schema_keys = set(payload["text"]["format"]["schema"]["properties"])
+                complete = self.audit()
+                if schema_keys == {"items"}:
+                    batch_text = payload["input"].split("BATCH BULLETS START\n", 1)[1]
+                    ids = [int(value) for value in re.findall(r"^- Item (\d+):", batch_text, re.M)]
+                    result = {"items": [{**copy.deepcopy(complete["items"][global_id]), "bullet": local + 1}
+                                        for local, global_id in enumerate(ids)]}
+                else:
+                    result = {key: complete[key] for key in ("coverage", "editorial_issues")}
+                text = json.dumps(result)
+            else:
+                text = self.memo
+            visible_ids = range(8) if (audit_sources if is_audit else draft_sources) else []
             return httpx.Response(200, json={
                 "id": "resp_test", "object": "response", "created_at": 0,
                 "model": "test", "status": audit_status if is_audit else "completed",
@@ -83,9 +99,9 @@ class GenerateMemoTest(unittest.TestCase):
                 "usage": {"input_tokens": 100, "output_tokens": 32000, "total_tokens": 32100,
                           "output_tokens_details": {"reasoning_tokens": 28000}} if is_audit else None,
                 "output": [{"id": f"open_{i}", "type": "web_search_call", "status": "completed",
-                            "action": {"type": "open_page", "url": f"https://example.com/{i}"}} for i in range(8)] + [{"id": "search_test", "type": "web_search_call", "status": "completed",
+                            "action": {"type": "open_page", "url": f"https://example.com/{i}"}} for i in visible_ids] + [{"id": "search_test", "type": "web_search_call", "status": "completed",
                             "action": {"type": "search", "queries": [f"independent {area} query" for area in COVERAGE_AREAS], "sources": [
-                            {"type": "url", "url": f"https://example.com/{i}"} for i in range(8)]}},
+                            {"type": "url", "url": f"https://example.com/{i}"} for i in visible_ids]}},
                            {"id": "msg_test", "type": "message", "role": "assistant",
                             "status": "completed", "content": [{"type": "output_text",
                             "text": text, "annotations": []}]}],
@@ -106,7 +122,7 @@ class GenerateMemoTest(unittest.TestCase):
         except APIStatusError:
             self.fail("A temporary overload should recover on the fourth attempt")
         self.assertEqual(self.destination.read_text(), self.memo + "\n")
-        self.assertEqual(len(self.requests), 5)
+        self.assertEqual(len(self.requests), 8)
         self.assertEqual([call.args[0] for call in self.sleep.call_args_list], [15, 30, 60])
         self.assertNotIn("Sensitive error detail", self.output.getvalue())
 
@@ -144,7 +160,7 @@ class GenerateMemoTest(unittest.TestCase):
                 self.sleep.reset_mock()
                 self.transport([status, 200])
                 generate_memo.main()
-                self.assertEqual(len(self.requests), 3)
+                self.assertEqual(len(self.requests), 6)
                 self.sleep.assert_called_once_with(15)
                 self.assertEqual(self.destination.read_text(), self.memo + "\n")
 
@@ -158,17 +174,17 @@ class GenerateMemoTest(unittest.TestCase):
 
     def test_validation_failure_is_not_retried_or_published(self):
         self.memo = "Invalid memo without sources"
-        self.transport([200, 200])
+        self.transport([200, 200, 200])
         with self.assertRaises(ValueError):
             generate_memo.main()
-        self.assertEqual(len(self.requests), 2)
+        self.assertEqual(len(self.requests), 3)
         self.sleep.assert_not_called()
         self.assertEqual(self.destination.read_text(), "Previous valid edition\n")
 
     def test_success_does_not_retry(self):
         self.transport([200])
         generate_memo.main()
-        self.assertEqual(len(self.requests), 2)
+        self.assertEqual(len(self.requests), 5)
         self.sleep.assert_not_called()
         self.assertEqual(self.destination.read_text(), self.memo + "\n")
         self.assertEqual(self.requests[0].extensions["timeout"]["read"], 300.0)
@@ -177,7 +193,7 @@ class GenerateMemoTest(unittest.TestCase):
         audit = self.audit()
         audit["items"][0]["supported"] = False
         with patch.object(self, "audit", return_value=audit):
-            self.transport([200, 200])
+            self.transport([200, 200, 200])
             with self.assertRaisesRegex(ValueError, "unsupported"):
                 generate_memo.main()
         self.assertEqual(self.destination.read_text(), "Previous valid edition\n")
@@ -287,7 +303,9 @@ class GenerateMemoTest(unittest.TestCase):
         self.transport([200])
         generate_memo.main()
         artifact = json.loads((self.root / "artifacts/memo-audit.json").read_text())
-        self.assertEqual([entry["stage"] for entry in artifact["retrieval"]], ["draft", "audit"])
+        self.assertEqual(artifact["retrieval"][0]["stage"], "draft")
+        self.assertEqual({entry["stage"] for entry in artifact["retrieval"][1:]},
+                         {"audit_1_coverage", "audit_1_facts_1_3", "audit_1_facts_4_6", "audit_1_facts_7_8"})
         self.assertEqual(artifact["retrieval"][0]["queries"], sorted(f"independent {area} query" for area in COVERAGE_AREAS))
         self.assertEqual(artifact["retrieval"][0]["unmatched_citations"], [])
         self.assertEqual(len(artifact["retrieval"][0]["urls"]), 8)
@@ -302,7 +320,7 @@ class GenerateMemoTest(unittest.TestCase):
     def test_audit_has_larger_output_and_timeout_without_expanding_draft(self):
         self.transport([200])
         generate_memo.main()
-        draft, audit = self.requests
+        draft, audit = self.requests[:2]
         self.assertEqual(json.loads(draft.content)["max_output_tokens"], 14000)
         self.assertEqual(json.loads(audit.content)["max_output_tokens"], 32000)
         self.assertEqual(draft.extensions["timeout"]["read"], 300.0)
@@ -318,6 +336,34 @@ class GenerateMemoTest(unittest.TestCase):
         self.assertEqual(artifact["provider_incomplete"]["usage"]["reasoning_tokens"], 28000)
         self.assertEqual(artifact["usage"][-1]["output_tokens"], 32000)
         self.assertEqual(self.destination.read_text(), "Previous valid edition\n")
+
+    def test_two_repairs_allow_structural_then_factual_correction(self):
+        self.transport([200, 200, 200])
+        with patch.object(generate_memo, "validate", side_effect=[["repair structural defect"], [], []]), \
+                patch.object(generate_memo, "validate_audit", side_effect=[["repair verified factual defect"], []]):
+            generate_memo.main()
+        self.assertEqual(self.destination.read_text(), self.memo + "\n")
+        self.assertEqual(len([request for request in self.requests if "text" not in json.loads(request.content)]), 3)
+        artifact = json.loads((self.root / "artifacts/memo-audit.json").read_text())
+        self.assertEqual(len(artifact["checks"]), 3)
+        self.assertEqual(artifact["audit_execution"]["max_repair_rounds"], 2)
+
+    def test_unmatched_author_citation_passes_only_after_independent_verification(self):
+        self.transport([200], draft_sources=False)
+        generate_memo.main()
+        artifact = json.loads((self.root / "artifacts/memo-audit.json").read_text())
+        self.assertEqual(len(artifact["retrieval"][0]["unmatched_citations"]), 8)
+        self.assertEqual(len(artifact["checks"]), 1)
+        self.assertTrue(artifact["passed"])
+        self.assertEqual(self.destination.read_text(), self.memo + "\n")
+
+    def test_unknown_final_source_cannot_pass_even_when_author_check_is_diagnostic(self):
+        self.transport([200, 200, 200], draft_sources=False, audit_sources=False)
+        with self.assertRaisesRegex(ValueError, "must be opened"):
+            generate_memo.main()
+        self.assertEqual(self.destination.read_text(), "Previous valid edition\n")
+        artifact = json.loads((self.root / "artifacts/memo-audit.json").read_text())
+        self.assertFalse(artifact["passed"])
 
 
 if __name__ == "__main__":

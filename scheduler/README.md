@@ -18,7 +18,7 @@ Use Wrangler's interactive login/secret commands; enter credentials through the 
 - Five-minute checks from 06:35 to 07:55 HKT (22:35–23:55 UTC).
 - Skip weekends and explicit HK exchange holidays. The calendar is shared with the Python implementation and its synchronization is tested. Unsupported years fail visibly; renew the calendar before 2028.
 - Stop when the live page, current-date receipt, research cutoff and content hash agree.
-- Skip dispatch while a main-branch run is active.
+- Skip dispatch while a production main-branch run is active. Marked rehearsals do not block production or consume its attempt allowance. Runs stalled for more than 35 minutes require attention; the scheduler never cancels another run automatically.
 - At most three generation-window dispatches; at most two additional deployment-only recovery dispatches after 07:30.
 - After 07:30, recovery uses `generate=false`; the workflow refuses to fabricate or regenerate a missing approved edition.
 - Public-page failures, GitHub API failures, exhausted attempts and missed targets remain visible in Worker execution logs. Never log secrets.

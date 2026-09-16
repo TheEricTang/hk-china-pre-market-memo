@@ -4,6 +4,7 @@ import os
 import re
 import time
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -12,7 +13,9 @@ from openai import APIConnectionError, APIStatusError, OpenAI
 
 from validate_memo import validate
 from trading_calendar import is_hk_trading_day
-from quality_audit import AUDIT_SCHEMA, audit_instruction, normalized_url, opened_urls, retrieved_queries, retrieved_urls, validate_audit
+from quality_audit import (AUDIT_SCHEMA, FACTS_AUDIT_SCHEMA, COVERAGE_AUDIT_SCHEMA,
+                           facts_audit_instruction, coverage_audit_instruction,
+                           normalized_url, opened_urls, retrieved_queries, retrieved_urls, validate_audit)
 
 ROOT = Path(__file__).resolve().parents[1]
 HKT = ZoneInfo("Asia/Hong_Kong")
@@ -23,6 +26,9 @@ AUDIT_RESERVE_SECONDS = 360
 REPAIR_STAGE_SECONDS = 360
 MIN_REPAIR_SECONDS = REPAIR_STAGE_SECONDS + AUDIT_RESERVE_SECONDS
 AUTOMATIC_BUDGET_SECONDS = 22 * 60
+MAX_REPAIRS = 2
+AUDIT_BATCH_SIZE = 3
+AUDIT_WORKERS = 4
 
 
 def stage_deadline(overall_deadline, maximum_seconds, reserve_seconds=0):
@@ -68,7 +74,7 @@ class IncompleteResponseError(ValueError):
         super().__init__(f"Incomplete provider response: {status} (reason={reason})")
 
 
-def request_memo(client: OpenAI, instruction: str, *, audit=False, deadline=None):
+def request_memo(client: OpenAI, instruction: str, *, audit=False, deadline=None, audit_schema=None):
     """Allow transient outages time to clear without unbounded API retries."""
     attempts = len(RETRY_DELAYS) + 1
     for attempt in range(attempts):
@@ -78,7 +84,7 @@ def request_memo(client: OpenAI, instruction: str, *, audit=False, deadline=None
                 raise TimeoutError("Generation/review budget exhausted; previous edition retained")
             options = {"timeout": min(600.0 if audit else 300.0, remaining)}
             if audit:
-                options["text"] = {"format": {"type": "json_schema", "name": "memo_audit", "strict": True, "schema": AUDIT_SCHEMA}}
+                options["text"] = {"format": {"type": "json_schema", "name": "memo_audit", "strict": True, "schema": audit_schema if audit_schema is not None else AUDIT_SCHEMA}}
             response = client.responses.create(
                 model=os.getenv("OPENAI_MODEL", "gpt-5.6-sol"),
                 input=instruction,
@@ -116,6 +122,77 @@ def request_memo(client: OpenAI, instruction: str, *, audit=False, deadline=None
             if deadline is not None and time.monotonic() + delay + 15 >= deadline:
                 raise TimeoutError("Insufficient time to retry before generation deadline") from error
             time.sleep(delay)
+
+
+def parallel_audit(client, markdown, window_start, cutoff, *, deadline, record_response):
+    """Small independent article-check batches and one full-memo coverage search.
+
+    All jobs share one deadline. Only this coordinating thread writes artifacts.
+    Per-batch provenance prevents one reviewer borrowing another's source opens.
+    """
+    if deadline - time.monotonic() < 15:
+        raise TimeoutError("No time remains for the mandatory parallel audit")
+    bullets = [line.strip() for line in markdown.splitlines() if line.strip().startswith("- ")]
+    if not bullets:
+        raise ValueError("Cannot audit an empty memo")
+    tasks = [("coverage", None, coverage_audit_instruction(markdown, window_start, cutoff), COVERAGE_AUDIT_SCHEMA)]
+    for offset in range(0, len(bullets), AUDIT_BATCH_SIZE):
+        batch = bullets[offset:offset + AUDIT_BATCH_SIZE]
+        tasks.append((f"facts_{offset + 1}_{offset + len(batch)}", (offset, len(batch)),
+                      facts_audit_instruction(batch, window_start, cutoff), FACTS_AUDIT_SCHEMA))
+    audit = {"items": [], "coverage": [], "editorial_issues": []}
+    provenance = {"urls": set(), "queries": set(), "opened": set(), "items": {}, "coverage": {}}
+    failures = []
+    with ThreadPoolExecutor(max_workers=AUDIT_WORKERS, thread_name_prefix="memo-audit") as pool:
+        pending = {pool.submit(request_memo, client, prompt, audit=True, audit_schema=schema,
+                               deadline=deadline): (stage, batch)
+                   for stage, batch, prompt, schema in tasks}
+        try:
+            for future in as_completed(pending, timeout=max(0, deadline - time.monotonic())):
+                stage, batch = pending[future]
+                try:
+                    response = future.result()
+                    record_response(response, stage)
+                    result = json.loads(response.output_text)
+                    if not isinstance(result, dict):
+                        raise ValueError(f"Audit {stage} must return a JSON object")
+                    own = {"urls": retrieved_urls(response), "queries": retrieved_queries(response),
+                           "opened": opened_urls(response)}
+                    for key in ("urls", "queries", "opened"):
+                        provenance[key].update(own[key])
+                    if batch is None:
+                        if set(result) != {"coverage", "editorial_issues"}:
+                            raise ValueError("Coverage audit returned an invalid shape")
+                        audit.update(result)
+                        provenance["coverage"] = own
+                    else:
+                        offset, count = batch
+                        items = result.get("items")
+                        if set(result) != {"items"} or not isinstance(items, list) or sorted(
+                                item.get("bullet", -1) for item in items) != list(range(1, count + 1)):
+                            raise ValueError(f"Audit {stage} must check each local bullet exactly once")
+                        for item in items:
+                            global_number = offset + item["bullet"]
+                            audit["items"].append({**item, "bullet": global_number})
+                            provenance["items"][global_number] = own
+                except Exception as error:
+                    # Collect completed diagnostics, but an incomplete batch always fails closed.
+                    if isinstance(error, IncompleteResponseError):
+                        error.diagnostics["stage"] = stage
+                    failures.append(error)
+                    for queued in pending:
+                        queued.cancel()
+        finally:
+            for queued in pending:
+                queued.cancel()
+    if failures:
+        raise failures[0]
+    if deadline < time.monotonic():
+        raise TimeoutError("Parallel audit exceeded its shared research deadline")
+    audit["items"].sort(key=lambda item: item["bullet"])
+    if len(provenance["items"]) != len(bullets) or not provenance["coverage"]:
+        raise ValueError("Parallel audit did not complete every required review")
+    return audit, provenance
 
 
 def coverage_start(now):
@@ -173,7 +250,9 @@ Return only finished Markdown memo. No preface, code fences, or completion note.
               "passed": False, "checks": [], "usage": [], "retrieval": [],
               "budgets_seconds": {"draft": DRAFT_STAGE_SECONDS, "audit": AUDIT_STAGE_SECONDS,
                                   "audit_reserve": AUDIT_RESERVE_SECONDS, "repair": REPAIR_STAGE_SECONDS,
-                                  "overall": budget}}
+                                  "overall": budget},
+              "audit_execution": {"batch_size": AUDIT_BATCH_SIZE, "max_workers": AUDIT_WORKERS,
+                                  "max_repair_rounds": MAX_REPAIRS}}
 
     def persist_report():
         artifact_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -192,7 +271,7 @@ Return only finished Markdown memo. No preface, code fences, or completion note.
         with OpenAI(max_retries=0, timeout=300.0) as client:
             response = request_memo(client, instruction, deadline=stage_deadline(deadline, DRAFT_STAGE_SECONDS, AUDIT_RESERVE_SECONDS))
             record_usage(response, "draft")
-            for attempt in range(2):
+            for attempt in range(MAX_REPAIRS + 1):
                 markdown = re.sub(r"\s*\(\[[^\]]+\]\(https?://[^\s)]+\)\)\s*(?=\[\[)", " ", response.output_text.strip())
                 markdown = stamp_cutoff(markdown, start, now)
                 (artifact_path.parent / "memo-candidate.md").write_text(markdown + "\n", encoding="utf-8")
@@ -201,20 +280,25 @@ Return only finished Markdown memo. No preface, code fences, or completion note.
                 cited_urls = {url for url in re.findall(r"\]\((https?://[^)\s]+)\)", markdown)}
                 unmatched = {normalized_url(url) for url in cited_urls} - draft_urls
                 report["retrieval"][-1]["unmatched_citations"] = sorted(diagnostic_url(url) for url in unmatched)
-                if not cited_urls or unmatched:
-                    errors.append("Draft citations must come from sources retrieved during this generation")
+                # Author provenance is diagnostic. The independent facts batches must
+                # open and substantiate every final public citation before promotion.
+                if not cited_urls:
+                    errors.append("Draft has no specific source citations")
                 persist_report()
                 audit = None
                 if not errors:
-                    checked = request_memo(client, audit_instruction(markdown, start, now), audit=True, deadline=stage_deadline(deadline, AUDIT_STAGE_SECONDS))
-                    record_usage(checked, "audit" if attempt == 0 else "reaudit")
-                    audit = json.loads(checked.output_text)
-                    errors = validate_audit(audit, markdown, retrieved_urls(checked), start, now, retrieved_queries(checked), opened_urls(checked))
+                    audit, audit_sources = parallel_audit(
+                        client, markdown, start, now, deadline=stage_deadline(deadline, AUDIT_STAGE_SECONDS),
+                        record_response=lambda checked, stage: record_usage(checked, f"audit_{attempt + 1}_{stage}"))
+                    errors = validate_audit(audit, markdown, audit_sources["urls"], start, now,
+                                            audit_sources["queries"], audit_sources["opened"],
+                                            item_provenance=audit_sources["items"],
+                                            coverage_provenance=audit_sources["coverage"])
                 report["checks"].append({"attempt": attempt + 1, "audit": audit, "errors": errors})
                 persist_report()
                 if not errors:
                     break
-                if attempt == 1 or deadline - time.monotonic() < MIN_REPAIR_SECONDS:
+                if attempt == MAX_REPAIRS or deadline - time.monotonic() < MIN_REPAIR_SECONDS:
                     raise ValueError("Quality gate failed: " + "; ".join(errors))
                 repair = instruction + "\nCorrect the failed draft using independently verified research. Keep the SAME cutoff.\n" + json.dumps({"previous_draft": markdown, "audit": audit, "errors": errors}, ensure_ascii=False)
                 response = request_memo(client, repair, deadline=stage_deadline(deadline, REPAIR_STAGE_SECONDS, AUDIT_RESERVE_SECONDS))

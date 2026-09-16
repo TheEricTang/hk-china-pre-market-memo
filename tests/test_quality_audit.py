@@ -183,6 +183,20 @@ class QualityAuditTest(unittest.TestCase):
         ]}
         self.assertEqual(opened_urls(response), {"https://example.com/opened"})
 
+    def test_fact_batch_cannot_borrow_another_reviewers_source_open(self):
+        queries = {query for check in self.audit["coverage"] for query in check["queries"]}
+        by_item = {i: {"urls": self.urls, "opened": self.urls} for i in range(1, 9)}
+        by_item[1] = {"urls": self.urls, "opened": set()}
+        errors = validate_audit(self.audit, self.markdown, self.urls, self.start, self.cutoff,
+                                queries, self.urls, item_provenance=by_item)
+        self.assertTrue(any("Bullet 1: every public citation must be opened" in error for error in errors))
+
+    def test_coverage_cannot_borrow_fact_batch_search_history(self):
+        queries = {query for check in self.audit["coverage"] for query in check["queries"]}
+        errors = validate_audit(self.audit, self.markdown, self.urls, self.start, self.cutoff,
+                                queries, self.urls, coverage_provenance={"urls": self.urls, "queries": set()})
+        self.assertTrue(any("claimed queries were not executed" in error for error in errors))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -43,7 +43,12 @@ Independently check these areas using English and Chinese searches:
 Seek the new milestone rather than repeat a familiar theme. Publication after the previous
 close alone does not make an old event new. At most 30% of retained items may be useful recap.
 Cross-check surprising or market-moving claims with a second reliable source. Every article
-link must have been retrieved during this run and must support its attached claim. Never use
+link must be copied exactly from a specific article retrieved and opened during this run;
+do not reconstruct a URL, substitute a similar path, or cite a search-result URL without opening it.
+Check every material claim against the article links actually attached to its paragraph. If a
+separate release supplies a forecast, transaction term or other detail, attach that release's
+exact verified link too; a related statement alone does not support it. Remove details that the
+attached sources do not substantiate; retain uncertainty where the sources themselves qualify a claim. Never use
 invented tickers, guessed URLs, generic homepages or undated snippets to meet coverage targets.
 
 ## Copy-ready paragraphs
@@ -52,11 +57,17 @@ Lead with the dominant overnight event, then move naturally through policy, sect
 company catalysts. Each '- ' bullet is a standalone copy unit: concise topic title, colon,
 and one to three factual sentences, normally 35–65 words. Short results and complex policy
 may differ. End each bullet with compact linked source tags: `[[Source](https://article-url)]`.
+Rank by materiality: routine small buybacks and minor corporate notices must not crowd out
+larger HK/China developments or consequential sector catalysts. A familiar issuer or an easy-to-find
+announcement is not sufficient reason to rank it above more material verified news.
 
 Spend words on events, amounts, comparisons, conditions and attribution. Generic endings
 such as 'keeps the sector in focus' add no information. Do not pad or force an arbitrary word
 quota; include all material verified stories. The structural safety check requires at least
 eight sourced units; a sparse draft should trigger more research, never invented filler.
+Research-process notes, unavailable-digest notices and source-access problems are not news units.
+Do not put them in numbered or '- ' news bullets or count them toward the minimum. Record source
+limitations in the audit; if a reader-facing qualification is necessary, use one brief unbulleted line.
 
 Check event-specific fields before writing:
 
@@ -66,9 +77,13 @@ Check event-specific fields before writing:
 - IPO/index changes: stage, issuer identity, effective date, additions/removals and key terms.
 - Deals/capital raises: parties, amount/currency, conditions and approvals still required.
 
-Use consistent verified English issuer names and ticker/exchange mappings. Split unrelated
-catalysts into separate units. A continuing story needs a new dated milestone. Avoid duplicate
+Use consistent verified English issuer names and ticker/exchange mappings. If the English name
+cannot be verified, retain the sourced Chinese issuer name with its verified ticker; do not invent
+a translation or guess an alias. Split unrelated catalysts into separate units.
+A continuing story needs a new dated milestone. Avoid duplicate
 figures/items. Preserve reported/confirmed, proposed/approved and announced/effective distinctions.
+Apply these distinctions to the topic title as well as the body: a proposed control transfer,
+conditional tender, planned issuance or pending approval must not read as a completed transaction.
 
 ## Enforced promotion gate
 
@@ -76,8 +91,9 @@ The generator performs a separate fresh research call to audit every unit, retri
 verify critical facts and timestamps, and search the coverage checklist for omitted material news.
 The software checks complete per-unit review, actual tool-source membership, source/event times,
 recap share, all research areas, no unresolved missing stories, and no editorial defects.
-One bounded repair and full re-audit are permitted. Exhaustion or failure preserves the previous
-canonical memo; a lower-quality substitute is never accepted to meet the clock.
+Up to two bounded repairs, each followed by a full re-audit, are permitted within the overall budget.
+Exhaustion or failure preserves the previous canonical memo; a lower-quality substitute is never
+accepted to meet the clock.
 
 The audit is model-assisted evidence review, not proof that every fact is true or that no relevant
 story exists. False negatives/positives remain possible, so source links and the audit are retained
