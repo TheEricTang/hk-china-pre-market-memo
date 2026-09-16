@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from quality_audit import COVERAGE_AREAS, normalized_query, opened_urls, retrieved_queries, retrieved_urls, validate_audit
+from quality_audit import COVERAGE_AREAS, normalized_query, opened_urls, retrieved_queries, timestamp_bounds, completed_web_actions, retrieved_urls, validate_audit
 
 
 class QualityAuditTest(unittest.TestCase):
@@ -159,7 +159,7 @@ class QualityAuditTest(unittest.TestCase):
             audit = copy.deepcopy(self.audit)
             audit["items"][0]["source_checks"][0]["checked_facts"] = facts
             self.assertTrue(any("every checked source must identify supported facts" in err for err in self.check(audit)))
-        for timestamp in ("", "2026-09-15", "2026-09-15T05:30:00"):
+        for timestamp in ("", "2026-09-15T05:30:00"):
             audit = copy.deepcopy(self.audit)
             audit["items"][0]["source_checks"][0]["published_at"] = timestamp
             self.assertTrue(any("every source publication timestamp must be verified" in err for err in self.check(audit)))
@@ -196,6 +196,45 @@ class QualityAuditTest(unittest.TestCase):
         errors = validate_audit(self.audit, self.markdown, self.urls, self.start, self.cutoff,
                                 queries, self.urls, coverage_provenance={"urls": self.urls, "queries": set()})
         self.assertTrue(any("claimed queries were not executed" in error for error in errors))
+
+    def test_first_public_report_does_not_require_private_meeting_clock(self):
+        item = self.audit["items"][0]
+        item["event_time_basis"] = "first_public_report"
+        item["event_time_hkt"] = item["source_checks"][0]["published_at"]
+        item["evidence"] = "This is the verified first public report of the announcement, not the private signing clock."
+        self.assertEqual(self.check(), [])
+        item["event_time_hkt"] = "2026-09-15T05:29:00+08:00"
+        self.assertTrue(any("first-public-report time must match" in error for error in self.check()))
+
+    def test_prior_calendar_date_keeps_precision_and_can_support_recap(self):
+        item = self.audit["items"][0]
+        item.update(freshness="recap", event_time_basis="calendar_recap",
+                    event_time_hkt="2026-09-01", source_published_at="2026-09-01")
+        item["source_checks"][0]["published_at"] = "2026-09-01"
+        self.assertEqual(self.check(), [])
+        lower, upper = timestamp_bounds("2026-09-01")
+        self.assertGreater((upper - lower).total_seconds(), 24 * 3600)
+
+    def test_same_day_date_only_cannot_prove_pre_cutoff_eligibility(self):
+        for value in ("2026-09-15", "2026-09-15@+08:00"):
+            self.audit["items"][0]["source_checks"][0]["published_at"] = value
+            self.assertTrue(any("checked source publication is later" in error for error in self.check()))
+
+    def test_previous_dated_known_timezone_source_remains_recap_not_precisely_timed_new_news(self):
+        item = self.audit["items"][0]
+        item.update(event_time_basis="calendar_recap", freshness="recap",
+                    event_time_hkt="2026-09-14@+08:00", source_published_at="2026-09-14@+08:00")
+        item["source_checks"][0]["published_at"] = "2026-09-14@+08:00"
+        self.assertEqual(self.check(), [])
+        item.update(event_time_basis="event", freshness="new")
+        self.assertTrue(any("no verified new event" in error for error in self.check()))
+
+    def test_metadata_diagnostics_do_not_include_page_text_or_failed_actions(self):
+        response = {"output": [
+            {"type": "web_search_call", "status": "completed", "action": {"type": "open_page", "url": None, "text": "never persist"}},
+            {"type": "web_search_call", "status": "failed", "action": {"type": "open_page", "url": "https://example.com/fail"}},
+        ]}
+        self.assertEqual(completed_web_actions(response), [{"type": "open_page", "url": None, "sources": []}])
 
 
 if __name__ == "__main__":
