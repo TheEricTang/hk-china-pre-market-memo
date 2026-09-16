@@ -13,6 +13,7 @@ from openai import APIConnectionError, APIStatusError, OpenAI
 
 from validate_memo import validate
 from trading_calendar import is_hk_trading_day
+from source_evidence import fetch_source
 from quality_audit import (AUDIT_SCHEMA, FACTS_AUDIT_SCHEMA, COVERAGE_AUDIT_SCHEMA, FINAL_COVERAGE_AUDIT_SCHEMA,
                            facts_audit_instruction, coverage_audit_instruction,
                            COVERAGE_AREAS, has_distinct_queries, normalized_query, completed_web_actions,
@@ -25,7 +26,7 @@ DISCOVERY_STAGE_SECONDS = 240
 DRAFT_STAGE_SECONDS = 600
 AUDIT_STAGE_SECONDS = 600
 AUDIT_RESERVE_SECONDS = 360
-REPAIR_STAGE_SECONDS = 360
+REPAIR_STAGE_SECONDS = 180
 MIN_REPAIR_SECONDS = REPAIR_STAGE_SECONDS + AUDIT_RESERVE_SECONDS
 AUTOMATIC_BUDGET_SECONDS = 22 * 60
 MAX_REPAIRS = 2
@@ -151,7 +152,7 @@ def request_memo(client: OpenAI, instruction: str, *, audit=False, deadline=None
             time.sleep(delay)
 
 
-def parallel_audit(client, markdown, window_start, cutoff, *, deadline, record_response, discovery_inventory=None):
+def parallel_audit(client, markdown, window_start, cutoff, *, deadline, record_response, discovery_inventory=None, record_sources=None):
     """Small independent article-check batches and one full-memo coverage search.
 
     All jobs share one deadline. Only this coordinating thread writes artifacts.
@@ -170,21 +171,41 @@ def parallel_audit(client, markdown, window_start, cutoff, *, deadline, record_r
     audit = {"items": [], "coverage": [], "editorial_issues": [], "lead_dispositions": []}
     provenance = {"urls": set(), "queries": set(), "opened": set(), "items": {}, "coverage": {}}
     failures = []
+
+    def review_task(prompt, schema, batch):
+        fetched = []
+        if batch is not None:
+            offset, count = batch
+            local_bullets = bullets[offset:offset + count]
+            urls = sorted({url for line in local_bullets for url in re.findall(r"\]\((https?://[^)\s]+)\)", line)})
+            fetch_deadline = min(deadline - 15, time.monotonic() + 45)
+            for url in urls:
+                if time.monotonic() >= fetch_deadline:
+                    break
+                fetched.append(fetch_source(url, deadline=min(fetch_deadline, time.monotonic() + 10)))
+            prompt = facts_audit_instruction(local_bullets, window_start, cutoff,
+                                             prefetched_sources=[item for item in fetched if item.get("success") is True])
+        return request_memo(client, prompt, audit=True, audit_schema=schema, deadline=deadline), fetched
+
     with ThreadPoolExecutor(max_workers=AUDIT_WORKERS, thread_name_prefix="memo-audit") as pool:
-        pending = {pool.submit(request_memo, client, prompt, audit=True, audit_schema=schema,
-                               deadline=deadline): (stage, batch)
+        pending = {pool.submit(review_task, prompt, schema, batch): (stage, batch)
                    for stage, batch, prompt, schema in tasks}
         try:
             for future in as_completed(pending, timeout=max(0, deadline - time.monotonic())):
                 stage, batch = pending[future]
                 try:
-                    response = future.result()
+                    response, source_fetches = future.result()
                     record_response(response, stage)
+                    if record_sources is not None:
+                        record_sources(source_fetches, stage)
                     result = json.loads(response.output_text)
                     if not isinstance(result, dict):
                         raise ValueError(f"Audit {stage} must return a JSON object")
                     own = {"urls": retrieved_urls(response), "queries": retrieved_queries(response),
                            "opened": opened_urls(response)}
+                    provided = {normalized_url(item["url"]) for item in source_fetches if item.get("success") is True}
+                    own["urls"].update(provided)
+                    own["opened"].update(provided)
                     for key in ("urls", "queries", "opened"):
                         provenance[key].update(own[key])
                     if batch is None:
@@ -299,6 +320,18 @@ Return only finished Markdown memo. No preface, code fences, or completion note.
                                                     for action in completed_web_actions(response)]})
         persist_report()
 
+    def record_source_evidence(sources, stage):
+        entry = next(item for item in reversed(report["retrieval"]) if item["stage"] == stage)
+        # Public artifacts retain proof metadata, never full publisher article text.
+        entry["source_fetches"] = [{key: diagnostic_url(value) if key in ("url", "final_url") and value else value
+                                    for key, value in item.items() if key in
+                                    ("success", "url", "final_url", "fetched_at", "content_sha256", "error")}
+                                   for item in sources]
+        provided = {diagnostic_url(normalized_url(item["url"])) for item in sources if item.get("success") is True}
+        entry["urls"] = sorted(set(entry["urls"]) | provided)
+        entry["opened_urls"] = sorted(set(entry["opened_urls"]) | provided)
+        persist_report()
+
     try:
         if budget <= 15:
             raise TimeoutError("Insufficient time for generation and review before the 07:55 HKT cutoff")
@@ -356,7 +389,8 @@ Return only finished Markdown memo. No preface, code fences, or completion note.
                     audit, audit_sources = parallel_audit(
                         client, markdown, start, now, deadline=stage_deadline(deadline, AUDIT_STAGE_SECONDS),
                         record_response=lambda checked, stage: record_usage(checked, f"audit_{attempt + 1}_{stage}"),
-                        discovery_inventory=inventory)
+                        discovery_inventory=inventory,
+                        record_sources=lambda sources, stage: record_source_evidence(sources, f"audit_{attempt + 1}_{stage}"))
                     errors = validate_audit(audit, markdown, audit_sources["urls"], start, now,
                                             audit_sources["queries"], audit_sources["opened"],
                                             item_provenance=audit_sources["items"],

@@ -21,6 +21,9 @@ class ParallelAuditTest(unittest.TestCase):
         self.markdown = '\n'.join(f'- Item {i}: Fact. [[Source](https://example.com/{i})]' for i in range(18))
         self.deadline = time.monotonic() + 30
         self.recorded = []
+        self.fetcher = patch.object(generate_memo, 'fetch_source', side_effect=lambda url, **kwargs: {'success': False, 'url': url, 'error': 'test_unavailable'})
+        self.fetcher.start()
+        self.addCleanup(self.fetcher.stop)
 
     def response(self, instruction, schema):
         if schema == FINAL_COVERAGE_AUDIT_SCHEMA:
@@ -104,6 +107,25 @@ class ParallelAuditTest(unittest.TestCase):
             with self.assertRaises(TimeoutError):
                 self.run_audit()
             request.assert_not_called()
+
+    def test_fetched_article_text_reaches_only_its_own_review_batch(self):
+        prompts = []
+        def fetch(url, **kwargs):
+            return {'success': True, 'url': url, 'final_url': url,
+                    'text': 'Verified publisher article body for ' + url,
+                    'fetched_at': '2026-09-15T06:41:00+08:00', 'content_sha256': 'abc', 'error': None}
+        def request(client, instruction, *, audit, audit_schema, deadline):
+            prompts.append(instruction)
+            response = self.response(instruction, audit_schema)
+            response.model_dump = lambda: {'output': []}
+            return response
+        with patch.object(generate_memo, 'fetch_source', side_effect=fetch), \
+                patch.object(generate_memo, 'request_memo', side_effect=request):
+            result, provenance = self.run_audit()
+        self.assertEqual(provenance['items'][1]['opened'], {f'https://example.com/{i}' for i in range(3)})
+        self.assertNotIn('https://example.com/0', provenance['items'][4]['opened'])
+        self.assertTrue(any('Verified publisher article body for https://example.com/0' in prompt for prompt in prompts))
+        self.assertEqual(len(result['items']), 18)
 
 
 if __name__ == '__main__':

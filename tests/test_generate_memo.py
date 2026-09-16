@@ -40,6 +40,7 @@ class GenerateMemoTest(unittest.TestCase):
             )
         )
         self.stack.enter_context(patch.object(generate_memo, "ROOT", self.root))
+        self.stack.enter_context(patch.object(generate_memo, "fetch_source", side_effect=lambda url, **kwargs: {"success": False, "url": url, "error": "test_unavailable"}))
         clock = self.stack.enter_context(patch.object(generate_memo, "datetime"))
         clock.now.return_value = datetime(2026, 9, 15, 6, 40, tzinfo=ZoneInfo("Asia/Hong_Kong"))
         self.stack.enter_context(patch.dict("os.environ", {"EDITION_MODE": "preopen"}))
@@ -368,6 +369,25 @@ class GenerateMemoTest(unittest.TestCase):
         artifact = json.loads((self.root / "artifacts/memo-audit.json").read_text())
         self.assertEqual(len(artifact["checks"]), 3)
         self.assertEqual(artifact["audit_execution"]["max_repair_rounds"], 2)
+
+    def test_ten_remaining_minutes_allow_bounded_repair_and_full_reaudit(self):
+        self.transport([200, 200])
+        clock = [0.0]
+        checks = []
+        def review(*args, **kwargs):
+            checks.append(True)
+            if len(checks) == 1:
+                clock[0] = 720.0  # Reproduce the live run's 12-minute first pass.
+                return ["Correct a verified factual defect"]
+            return []
+        with patch.object(generate_memo.time, "monotonic", side_effect=lambda: clock[0]), \
+                patch.object(generate_memo, "validate_audit", side_effect=review):
+            generate_memo.main()
+        self.assertEqual(len(checks), 2)
+        self.assertEqual(self.destination.read_text(), self.memo + "\n")
+        drafts = [request for request in self.requests if "text" not in json.loads(request.content)]
+        self.assertEqual(len(drafts), 2)
+        self.assertLessEqual(drafts[-1].extensions["timeout"]["read"], 180)
 
     def test_unmatched_author_citation_passes_only_after_independent_verification(self):
         self.transport([200], draft_sources=False)
