@@ -45,7 +45,7 @@ class BuildSiteFreshnessTest(unittest.TestCase):
         self.assertIn("Today's edition is not yet available", status)
         self.assertIn("Showing 16 Sept 2026", status)
         self.assertIn("Target 07:30 HKT", status)
-        self.assertIn("research begins 06:35 HKT", status)
+        self.assertNotIn("research begins", status)
 
     def test_stale_at_target_and_hours_later_explicitly_says_delayed(self):
         for now in ("2026-09-16T23:30:00Z", "2026-09-17T03:00:00Z"):
