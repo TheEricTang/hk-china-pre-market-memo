@@ -2,6 +2,14 @@
 
 Cloudflare Worker Cron Triggers call the GitHub workflow-dispatch API independently of GitHub cron. This avoids the observed delayed scheduled-event creation; GitHub runners, the research provider and Pages remain dependencies. The Worker verifies both the public page and its hash-bound quality receipt.
 
+## GitHub early-runner fallback
+
+The workflow also requests a runner at 01:35, 02:35, 03:35 and 04:35 HKT. A runner that starts early waits until the actual same-day 06:35 HKT research window before synchronizing the repository and generating anything. It does not generate an early edition or backdate a late run. This gives delayed scheduled events several hours of margin while keeping the intended research cutoff. The existing daily concurrency group and current-edition checks suppress duplicate generation.
+
+Only these marked early scheduled jobs have a six-hour outer limit. Waiting is capped at five hours with short clock checks; normal jobs remain capped at 30 minutes, generation at 24 minutes with its 22-minute internal budget, and the other steps have bounded timeouts. Weekends, known HK holidays, unsupported calendar years and date rollover are handled explicitly. The Worker measures a same-day marked early runner's stall allowance from the later of its real creation time and 06:35 HKT, without rewriting its actual timestamp. Older runs receive no new allowance.
+
+GitHub documents a [six-hour hosted-job limit](https://docs.github.com/en/actions/reference/limits) and [free standard hosted runners for public repositories](https://docs.github.com/en/actions/concepts/billing-and-usage). This fallback uses no new hosting account. It is still exposed to [delayed or dropped GitHub schedules](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule), and its first actual overnight operation must be observed before treating it as validated delivery. The independent Worker remains the stronger separate-clock safeguard.
+
 ## Activation prerequisites
 
 1. Connect the owner's Cloudflare account. Do not deploy into an unrelated project or turn on billing without authorization.

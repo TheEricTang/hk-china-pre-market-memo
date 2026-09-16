@@ -16,7 +16,7 @@ from trading_calendar import is_hk_trading_day
 from quality_audit import (AUDIT_SCHEMA, FACTS_AUDIT_SCHEMA, COVERAGE_AUDIT_SCHEMA, FINAL_COVERAGE_AUDIT_SCHEMA,
                            facts_audit_instruction, coverage_audit_instruction,
                            COVERAGE_AREAS, has_distinct_queries, normalized_query, completed_web_actions,
-                           normalized_url, opened_urls, retrieved_queries, retrieved_urls, validate_audit)
+                           normalized_url, opened_urls, retrieved_queries, retrieved_urls, validate_audit, reconcile_research_metadata)
 
 ROOT = Path(__file__).resolve().parents[1]
 HKT = ZoneInfo("Asia/Hong_Kong")
@@ -190,7 +190,9 @@ def parallel_audit(client, markdown, window_start, cutoff, *, deadline, record_r
                     if batch is None:
                         if set(result) != {"coverage", "editorial_issues", "lead_dispositions"}:
                             raise ValueError("Coverage audit returned an invalid shape")
+                        result, discarded_metadata = reconcile_research_metadata(result, own["queries"])
                         audit.update(result)
+                        audit["research_metadata_diagnostics"] = discarded_metadata
                         provenance["coverage"] = own
                     else:
                         offset, count = batch
@@ -315,8 +317,14 @@ Return only finished Markdown memo. No preface, code fences, or completion note.
                 raise
             record_usage(discovered, "discovery")
             inventory = json.loads(discovered.output_text)
+            inventory, discarded_metadata = reconcile_research_metadata(
+                inventory, retrieved_queries(discovered), retrieved_urls(discovered))
+            for entry in discarded_metadata:
+                entry["discarded_source_urls"] = [diagnostic_url(url) if url.startswith(("http://", "https://")) else url
+                                                   for url in entry.get("discarded_source_urls", [])]
             discovery_errors = validate_discovery(inventory, retrieved_urls(discovered), retrieved_queries(discovered))
-            report["discovery"] = {"inventory": inventory, "errors": discovery_errors}
+            report["discovery"] = {"inventory": inventory, "errors": discovery_errors,
+                                   "research_metadata_diagnostics": discarded_metadata}
             persist_report()
             if discovery_errors:
                 raise ValueError("Discovery gate failed: " + "; ".join(discovery_errors))

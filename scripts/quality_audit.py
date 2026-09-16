@@ -2,6 +2,7 @@
 
 This is a fail-closed evidence gate, not a guarantee of factual completeness.
 """
+import copy
 import json
 import re
 from datetime import datetime, timedelta, timezone
@@ -176,6 +177,42 @@ def retrieved_queries(response):
             values.append(action["query"])
         queries.update(normalized_query(value) for value in values if isinstance(value, str) and value.strip())
     return queries
+
+
+def reconcile_research_metadata(inventory, query_provenance, source_provenance=None):
+    """Use provider history as the authority for performed research.
+
+    A model may over-report an extra query/lead URL even after doing valid research.
+    Discard those metadata claims rather than manufacturing history or rejecting
+    an otherwise fully researched area. Normal gates still require real evidence
+    and a distinct executed query per area. Source filtering is discovery-only;
+    final coverage and all public citations retain their strict source checks.
+    """
+    cleaned = copy.deepcopy(inventory)
+    diagnostics = []
+    for area in cleaned.get("coverage", []):
+        queries = area.get("queries", [])
+        discarded_queries = [query for query in queries if normalized_query(query) not in query_provenance]
+        area["queries"] = sorted({normalized_query(query) for query in queries
+                                   if normalized_query(query) in query_provenance})
+        entry = {"area": area.get("area", "unknown"), "discarded_queries": discarded_queries}
+        if source_provenance is not None:
+            retained, discarded = set(), []
+            for url in area.get("source_urls", []):
+                try:
+                    normalized = normalized_url(url)
+                except (ValueError, TypeError):
+                    discarded.append("[invalid or credentialed URL]")
+                    continue
+                if normalized in source_provenance:
+                    retained.add(normalized)
+                else:
+                    discarded.append(url)
+            area["source_urls"] = sorted(retained)
+            entry["discarded_source_urls"] = discarded
+        if discarded_queries or entry.get("discarded_source_urls"):
+            diagnostics.append(entry)
+    return cleaned, diagnostics
 
 
 def parse_timestamp(value):

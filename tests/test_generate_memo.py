@@ -469,6 +469,51 @@ class GenerateMemoTest(unittest.TestCase):
             generate_memo.main()
         self.assertEqual(self.destination.read_text(), "Previous valid edition\n")
 
+    def test_discovery_discards_unexecuted_extra_metadata_but_keeps_real_research(self):
+        inventory = {key: self.audit()[key] for key in ("coverage", "editorial_issues")}
+        inventory["coverage"][0]["queries"].append("unexecuted claimed query")
+        inventory["coverage"][0]["source_urls"].append("https://unretrieved.example/lead")
+        self.transport([200], discovery_inventory=inventory)
+        generate_memo.main()
+        report = json.loads((self.root / "artifacts/memo-audit.json").read_text())
+        self.assertTrue(report["passed"])
+        checked = report["discovery"]["inventory"]["coverage"][0]
+        self.assertEqual(checked["queries"], ["independent overnight_markets query"])
+        self.assertEqual(checked["source_urls"], ["https://example.com/0"])
+        discarded = report["discovery"]["research_metadata_diagnostics"][0]
+        self.assertEqual(discarded["discarded_queries"], ["unexecuted claimed query"])
+        self.assertEqual(discarded["discarded_source_urls"], ["https://unretrieved.example/lead"])
+
+    def test_discovery_area_without_any_real_query_still_stops_before_author(self):
+        inventory = {key: self.audit()[key] for key in ("coverage", "editorial_issues")}
+        inventory["coverage"][0]["queries"] = ["unexecuted claimed query"]
+        self.transport([200], discovery_inventory=inventory)
+        with self.assertRaisesRegex(ValueError, "Discovery gate failed"):
+            generate_memo.main()
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(self.destination.read_text(), "Previous valid edition\n")
+
+    def test_final_coverage_extra_claimed_queries_are_diagnostic_not_fake_history(self):
+        audit = self.audit()
+        audit["coverage"][0]["queries"].append("unexecuted final review query")
+        with patch.object(self, "audit", return_value=audit):
+            self.transport([200])
+            generate_memo.main()
+        report = json.loads((self.root / "artifacts/memo-audit.json").read_text())
+        final_audit = report["checks"][0]["audit"]
+        self.assertEqual(final_audit["coverage"][0]["queries"], ["independent overnight_markets query"])
+        self.assertEqual(final_audit["research_metadata_diagnostics"][0]["discarded_queries"], ["unexecuted final review query"])
+        self.assertTrue(report["passed"])
+
+    def test_final_coverage_source_checks_are_not_relaxed_by_discovery_filtering(self):
+        audit = self.audit()
+        audit["coverage"][0]["source_urls"].append("https://unretrieved.example/final")
+        with patch.object(self, "audit", return_value=audit):
+            self.transport([200, 200, 200])
+            with self.assertRaisesRegex(ValueError, "missing researched evidence"):
+                generate_memo.main()
+        self.assertEqual(self.destination.read_text(), "Previous valid edition\n")
+
 
 if __name__ == "__main__":
     unittest.main()
