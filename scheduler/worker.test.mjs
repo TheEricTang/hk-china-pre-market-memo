@@ -169,3 +169,48 @@ test('workflow gives rehearsals the explicit scheduler marker and preserves gene
   assert.match(workflow,/run-name: .*inputs\.dry_run.*Memo validation rehearsal.*Daily HK China memo/);
   assert.match(workflow,/name: Generate and validate memo\n\s+timeout-minutes: 24/);
 });
+
+test('known early scheduled runner is not stalled merely because it waited for06:35', async () => {
+  const f=fake(); const original=f.fetch;
+  const run={head_branch:'main',display_title:'Daily HK China memo — early runner',
+    status:'in_progress',event:'schedule',created_at:'2026-09-16T17:35:00Z'};
+  f.fetch=async(url,options)=>String(url).includes('/runs?')
+    ? Response.json({workflow_runs:[run]}) : original(url,options);
+  const out=await tick(env,{now,fetchImpl:f.fetch});
+  assert.equal(out.state,'running');
+  assert.equal(run.created_at,'2026-09-16T17:35:00Z');
+  assert.equal(f.calls.filter(x=>x.method==='POST').length,0);
+});
+
+test('early runner becomes stalled after35minutes of its eligible research window', async () => {
+  const f=fake(); const original=f.fetch;
+  f.fetch=async(url,options)=>String(url).includes('/runs?') ? Response.json({workflow_runs:[{
+    head_branch:'main',display_title:'Daily HK China memo — early runner',
+    status:'in_progress',event:'schedule',created_at:'2026-09-16T17:35:00Z'
+  }]}) : original(url,options);
+  const out=await tick(env,{now:new Date('2026-09-16T23:11:00Z'),fetchImpl:f.fetch});
+  assert.equal(out.state,'stalled');
+  assert.equal(out.requiresAttention,true);
+});
+
+test('early marker on manual dispatch cannot hide an old stalled run', async () => {
+  const f=fake(); const original=f.fetch;
+  f.fetch=async(url,options)=>String(url).includes('/runs?') ? Response.json({workflow_runs:[{
+    head_branch:'main',display_title:'Daily HK China memo — early runner',
+    status:'in_progress',event:'workflow_dispatch',created_at:'2026-09-16T17:35:00Z'
+  }]}) : original(url,options);
+  const out=await tick(env,{now,fetchImpl:f.fetch});
+  assert.equal(out.state,'stalled');
+});
+
+test('prior-day early runner does not receive a new research grace period each morning', async () => {
+  const f=fake(); const original=f.fetch;
+  f.fetch=async(url,options)=>String(url).includes('/runs?') ? Response.json({workflow_runs:[{
+    head_branch:'main',display_title:'Daily HK China memo — early runner',
+    status:'in_progress',event:'schedule',created_at:'2026-09-15T17:35:00Z'
+  }]}) : original(url,options);
+  const out=await tick(env,{now,fetchImpl:f.fetch});
+  assert.equal(out.state,'stalled');
+  assert.equal(out.requiresAttention,true);
+  assert.equal(f.calls.filter(x=>x.method==='POST').length,0);
+});

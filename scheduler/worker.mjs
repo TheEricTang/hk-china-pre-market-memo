@@ -7,6 +7,7 @@ const LAST_START = 7 * 60 + 30;
 const END = 8 * 60;
 const MAX_DAILY_DISPATCHES = 3;
 const VALIDATION_RUN_TITLE = 'Memo validation rehearsal';
+const EARLY_RUN_TITLE = 'Daily HK China memo — early runner';
 const STALLED_AFTER_MS = 35 * 60 * 1000;
 const MAX_DEPLOYMENT_RECOVERY_DISPATCHES = 2;
 
@@ -76,7 +77,12 @@ export async function tick(env, { now = new Date(), fetchImpl = fetch } = {}) {
   const activeRuns = productionRuns.filter(run => run.status !== 'completed');
   const stalledRuns = activeRuns.filter(run => {
     const created = Date.parse(run.created_at || run.run_started_at);
-    return Number.isFinite(created) && now.getTime() - created > STALLED_AFTER_MS;
+    // Keep the actual creation timestamp intact. Only known early scheduled runs
+    // can legitimately spend hours waiting before the research window opens.
+    const reference = run.event === 'schedule' && run.display_title === EARLY_RUN_TITLE
+      && Number.isFinite(created) && hkClock(new Date(created)).date === clock.date
+      ? Math.max(created, Date.parse(clock.date + 'T06:35:00+08:00')) : created;
+    return Number.isFinite(reference) && now.getTime() - reference > STALLED_AFTER_MS;
   });
   if (stalledRuns.length) {
     return { state: 'stalled', date: clock.date, deadlineMissed, requiresAttention: true };

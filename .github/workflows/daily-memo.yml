@@ -1,5 +1,5 @@
 name: Daily HK China memo
-run-name: ${{ inputs.dry_run && 'Memo validation rehearsal' || 'Daily HK China memo' }}
+run-name: ${{ inputs.dry_run && 'Memo validation rehearsal' || github.event_name == 'schedule' && github.event.schedule == '35 17-20 * * *' && 'Daily HK China memo — early runner' || 'Daily HK China memo' }}
 
 on:
   # Re-saving this workflow on main is an explicit recovery trigger. The path
@@ -37,6 +37,8 @@ on:
           - intraday
   schedule:
     # GitHub cron is expressed in UTC. Hong Kong does not observe DST.
+    # Reserve a runner before the morning queue; research still begins after 06:35 HKT.
+    - cron: "35 17-20 * * *" # 01:35, 02:35, 03:35, 04:35 HKT early-runner attempts
     - cron: "40 22 * * *" # 06:40 HKT
     - cron: "52 22 * * *" # 06:52 HKT retry
     - cron: "4 23 * * *"  # 07:04 HKT final retry
@@ -53,7 +55,7 @@ concurrency:
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: ${{ github.event_name == 'schedule' && github.event.schedule == '35 17-20 * * *' && 360 || 30 }}
     env:
       MEMO_AUTOMATIC: ${{ github.event_name != 'workflow_dispatch' || inputs.automatic }}
     environment:
@@ -61,27 +63,40 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+        timeout-minutes: 2
+      - name: Wait for the actual HK research window
+        if: github.event_name == 'schedule' && github.event.schedule == '35 17-20 * * *'
+        timeout-minutes: 305
+        env:
+          MEMO_SCHEDULE: ${{ github.event.schedule }}
+        run: python scripts/wait_for_research_window.py
       - name: Sync latest published state
+        timeout-minutes: 1
         run: git pull --ff-only origin "${GITHUB_REF_NAME}"
       - name: Decide whether this run should publish
+        timeout-minutes: 1
         id: publish
         env:
           AUTOMATIC: ${{ inputs.automatic }}
           GENERATE: ${{ inputs.generate }}
         run: python scripts/publication_plan.py
       - uses: actions/setup-python@v5
+        timeout-minutes: 2
         if: steps.publish.outputs.required == 'true'
         with:
           python-version: "3.12"
           cache: pip
       - if: steps.publish.outputs.required == 'true'
+        timeout-minutes: 2
         run: pip install -r requirements.txt
       - name: Run regression tests
+        timeout-minutes: 2
         if: steps.publish.outputs.required == 'true'
         run: |
           python -m unittest discover -s tests -v
           node --test scheduler/worker.test.mjs
       - name: Recheck generation deadline after setup
+        timeout-minutes: 1
         if: steps.publish.outputs.generate_required == 'true'
         env:
           AUTOMATIC: ${{ inputs.automatic }}
@@ -97,12 +112,15 @@ jobs:
           MEMO_VALIDATE_ONLY: ${{ inputs.dry_run && 'true' || 'false' }}
         run: python scripts/generate_memo.py
       - name: Build public site
+        timeout-minutes: 1
         if: steps.publish.outputs.required == 'true' && !inputs.dry_run
         run: python scripts/build_site.py
       - name: Check approved edition before publication
+        timeout-minutes: 1
         if: steps.publish.outputs.required == 'true' && !inputs.dry_run
         run: python scripts/verify_publication.py --local-only
       - name: Save successful memo
+        timeout-minutes: 2
         if: steps.publish.outputs.generate_required == 'true' && !inputs.dry_run
         run: |
           git config user.name "github-actions[bot]"
@@ -111,22 +129,27 @@ jobs:
           git diff --cached --quiet || git commit -m "memo: $(TZ=Asia/Hong_Kong date +%F)"
           git push
       - uses: actions/configure-pages@v5
+        timeout-minutes: 2
         if: steps.publish.outputs.required == 'true' && !inputs.dry_run
       - uses: actions/upload-pages-artifact@v3
+        timeout-minutes: 3
         if: steps.publish.outputs.required == 'true' && !inputs.dry_run
         with:
           path: docs
       - name: Deploy GitHub Pages
+        timeout-minutes: 4
         if: steps.publish.outputs.required == 'true' && !inputs.dry_run
         id: deployment
         uses: actions/deploy-pages@v4
       - name: Verify live public edition and quality receipt
+        timeout-minutes: 3
         if: steps.publish.outputs.required == 'true' && !inputs.dry_run
         run: python scripts/verify_publication.py
       - name: Record dry-run outcome
         if: inputs.dry_run && steps.publish.outputs.generate_required == 'true' && success()
         run: echo "Dry run completed; candidate passed independent review. No changes committed or published." >> "$GITHUB_STEP_SUMMARY"
       - name: Preserve generation audit
+        timeout-minutes: 2
         if: always()
         uses: actions/upload-artifact@v4
         with:
