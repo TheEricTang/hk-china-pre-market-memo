@@ -2,6 +2,7 @@ import io
 import json
 import sys
 import tempfile
+import traceback
 import unittest
 from contextlib import ExitStack, redirect_stdout
 from datetime import datetime
@@ -14,6 +15,7 @@ from openai import APIStatusError, OpenAI
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import generate_memo
+from quality_audit import COVERAGE_AREAS
 
 
 class GenerateMemoTest(unittest.TestCase):
@@ -54,7 +56,7 @@ class GenerateMemoTest(unittest.TestCase):
                        "source_urls": [f"https://example.com/{i}"],
                        "source_checks": [{"url": f"https://example.com/{i}", "published_at": "2026-09-15T05:30:00+08:00",
                                           "checked_facts": ["issuer announcement confirms amount and event"]}], "issues": []} for i in range(8)],
-            "coverage": [{"area": area, "queries": ["independent query"],
+            "coverage": [{"area": area, "queries": [f"independent {area} query"],
                           "finding": "Verified the latest relevant notices and no additional material stories.",
                           "source_urls": ["https://example.com/0"], "missing_material_stories": []}
                          for area in COVERAGE_AREAS],
@@ -82,7 +84,7 @@ class GenerateMemoTest(unittest.TestCase):
                           "output_tokens_details": {"reasoning_tokens": 28000}} if is_audit else None,
                 "output": [{"id": f"open_{i}", "type": "web_search_call", "status": "completed",
                             "action": {"type": "open_page", "url": f"https://example.com/{i}"}} for i in range(8)] + [{"id": "search_test", "type": "web_search_call", "status": "completed",
-                            "action": {"type": "search", "query": "independent query", "sources": [
+                            "action": {"type": "search", "queries": [f"independent {area} query" for area in COVERAGE_AREAS], "sources": [
                             {"type": "url", "url": f"https://example.com/{i}"} for i in range(8)]}},
                            {"id": "msg_test", "type": "message", "role": "assistant",
                             "status": "completed", "content": [{"type": "output_text",
@@ -215,6 +217,59 @@ class GenerateMemoTest(unittest.TestCase):
             generate_memo.main()
         self.assertNotIn("Sensitive error detail", (self.root / "artifacts/memo-audit.json").read_text())
 
+    def test_cli_suppresses_provider_body_in_public_error_output(self):
+        self.transport([401])
+        with self.assertRaises(SystemExit) as raised:
+            generate_memo.cli()
+        rendered = "".join(traceback.format_exception(raised.exception))
+        self.assertIn("provider HTTP 401", str(raised.exception))
+        self.assertNotIn("Sensitive error detail", rendered)
+        self.assertTrue(raised.exception.__suppress_context__)
+
+    def test_cli_suppresses_provider_body_chained_to_timeout(self):
+        request = httpx.Request("POST", "https://api.example.test")
+        provider = APIStatusError("Sensitive provider detail", response=httpx.Response(503, request=request), body={})
+
+        def fail():
+            try:
+                raise provider
+            except APIStatusError as error:
+                raise TimeoutError("Retry deadline expired") from error
+
+        with patch.object(generate_memo, "main", side_effect=fail):
+            with self.assertRaises(SystemExit) as raised:
+                generate_memo.cli()
+        rendered = "".join(traceback.format_exception(raised.exception))
+        self.assertIn("TimeoutError", str(raised.exception))
+        self.assertNotIn("Sensitive provider detail", rendered)
+        self.assertNotIn("Retry deadline expired", rendered)
+
+    def test_automatic_budget_caps_at_22_minutes_and_0755_hkt(self):
+        clock = datetime(2026, 9, 15, 7, 30, tzinfo=ZoneInfo("Asia/Hong_Kong"))
+        self.assertEqual(generate_memo.generation_budget(clock, 3600, automatic=True), 1320)
+        self.assertEqual(generate_memo.generation_budget(clock.replace(minute=40, second=30),
+                                                        1320, automatic=True), 870)
+        self.assertEqual(generate_memo.generation_budget(clock, 600, automatic=True), 600)
+
+    def test_manual_and_validation_only_budgets_remain_unchanged(self):
+        clock = datetime(2026, 9, 15, 8, 0, tzinfo=ZoneInfo("Asia/Hong_Kong"))
+        self.assertEqual(generate_memo.generation_budget(clock, 1320, automatic=False), 1320)
+        self.assertEqual(generate_memo.generation_budget(clock, 1320, automatic=True,
+                                                        validate_only=True), 1320)
+
+    def test_insufficient_automatic_wall_clock_budget_prevents_paid_request(self):
+        self.transport([200])
+        with patch.dict("os.environ", {"MEMO_AUTOMATIC": "true", "MEMO_VALIDATE_ONLY": "false"}), \
+                patch.object(generate_memo, "datetime") as clock:
+            clock.now.return_value = datetime(2026, 9, 15, 7, 54, 50, tzinfo=ZoneInfo("Asia/Hong_Kong"))
+            with self.assertRaisesRegex(TimeoutError, "07:55 HKT"):
+                generate_memo.main()
+        self.assertEqual(self.requests, [])
+        self.assertEqual(self.destination.read_text(), "Previous valid edition\n")
+        artifact = json.loads((self.root / "artifacts/memo-audit.json").read_text())
+        self.assertEqual(artifact["budgets_seconds"]["overall"], 10)
+        self.assertFalse(artifact["passed"])
+
     def test_model_clock_cannot_override_machine_cutoff(self):
         self.memo = self.memo.replace("06:40 HKT", "09:29 HKT")
         self.transport([200])
@@ -233,7 +288,7 @@ class GenerateMemoTest(unittest.TestCase):
         generate_memo.main()
         artifact = json.loads((self.root / "artifacts/memo-audit.json").read_text())
         self.assertEqual([entry["stage"] for entry in artifact["retrieval"]], ["draft", "audit"])
-        self.assertEqual(artifact["retrieval"][0]["queries"], ["independent query"])
+        self.assertEqual(artifact["retrieval"][0]["queries"], sorted(f"independent {area} query" for area in COVERAGE_AREAS))
         self.assertEqual(artifact["retrieval"][0]["unmatched_citations"], [])
         self.assertEqual(len(artifact["retrieval"][0]["urls"]), 8)
         self.assertEqual(len(artifact["retrieval"][1]["opened_urls"]), 8)

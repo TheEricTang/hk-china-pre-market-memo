@@ -6,6 +6,8 @@ const TARGET = 7 * 60 + 30;
 const LAST_START = 7 * 60 + 30;
 const END = 8 * 60;
 const MAX_DAILY_DISPATCHES = 3;
+const VALIDATION_RUN_TITLE = 'Memo validation rehearsal';
+const STALLED_AFTER_MS = 35 * 60 * 1000;
 const MAX_DEPLOYMENT_RECOVERY_DISPATCHES = 2;
 
 function hkClock(now) {
@@ -68,14 +70,25 @@ export async function tick(env, { now = new Date(), fetchImpl = fetch } = {}) {
   if (!result.ok) throw new Error(`GitHub status HTTP ${result.status}`);
   const runs = (await result.json()).workflow_runs;
   if (!Array.isArray(runs)) throw new Error('GitHub status missing workflow runs');
-  if (runs.some(run => run.head_branch === 'main' && run.status !== 'completed')) {
+  // Rehearsals have their own concurrency group and must not suppress production.
+  // Unknown/legacy titles remain production candidates for safe duplicate suppression.
+  const productionRuns = runs.filter(run => run.head_branch === 'main' && run.display_title !== VALIDATION_RUN_TITLE);
+  const activeRuns = productionRuns.filter(run => run.status !== 'completed');
+  const stalledRuns = activeRuns.filter(run => {
+    const created = Date.parse(run.created_at || run.run_started_at);
+    return Number.isFinite(created) && now.getTime() - created > STALLED_AFTER_MS;
+  });
+  if (stalledRuns.length) {
+    return { state: 'stalled', date: clock.date, deadlineMissed, requiresAttention: true };
+  }
+  if (activeRuns.length) {
     return { state: 'running', date: clock.date, deadlineMissed };
   }
   // Preserve a separate, bounded recovery allowance for an approved memo whose
   // Pages deployment failed after the paid-generation window closed.
   const deploymentOnly = clock.minutes > LAST_START;
   const windowStart = Date.parse(clock.date + (deploymentOnly ? 'T07:31:00+08:00' : 'T06:35:00+08:00'));
-  const dispatched = runs.filter(run => run.event === 'workflow_dispatch' && run.head_branch === 'main'
+  const dispatched = productionRuns.filter(run => run.event === 'workflow_dispatch'
     && Date.parse(run.created_at) >= windowStart).length;
   const dispatchLimit = deploymentOnly ? MAX_DEPLOYMENT_RECOVERY_DISPATCHES : MAX_DAILY_DISPATCHES;
   if (dispatched >= dispatchLimit) {
@@ -94,6 +107,7 @@ export default {
     // Use actual execution time, never backdate a delayed trigger to its intended time.
     const result = await tick(env);
     console.log(JSON.stringify(result));
+    if (result.requiresAttention) throw new Error(`Memo production run stalled for ${result.date}; operator attention required`);
     if (result.deadlineMissed) throw new Error(`Memo delivery target missed for ${result.date}: ${result.state}`);
   },
   async fetch() { return new Response('Not found', { status: 404 }); },

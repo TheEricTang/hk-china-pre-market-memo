@@ -129,3 +129,43 @@ test('all automatic recovery dispatches stop at 08:00 HKT', async () => {
   assert.equal(out.state,'skipped');
   assert.equal(f.calls.length,0);
 });
+
+
+test('main-branch rehearsal does not suppress production or consume dispatch allowance', async () => {
+  const f = fake(); const original = f.fetch;
+  f.fetch = async (url, options) => String(url).includes('/runs?') ? Response.json({workflow_runs:
+    [0,1,2,3].map(i => ({head_branch:'main', display_title:'Memo validation rehearsal',
+      status:i===0?'in_progress':'completed', event:'workflow_dispatch', created_at:'2026-09-16T22:35:00Z'}))
+  }) : original(url, options);
+  const out = await tick(env, {now:new Date('2026-09-16T23:05:00Z'), fetchImpl:f.fetch});
+  assert.equal(out.state, 'dispatched');
+  assert.equal(f.calls.filter(x=>x.method==='POST').length, 1);
+});
+
+test('production run older than35minutes requires attention without cancellation or dispatch', async () => {
+  for (const status of ['queued','in_progress','waiting']) {
+    const f=fake(); const original=f.fetch;
+    f.fetch=async(url, options)=>String(url).includes('/runs?') ? Response.json({workflow_runs:[{
+      head_branch:'main', display_title:'Daily HK China memo', status, created_at:'2026-09-16T21:59:00Z'
+    }]}) : original(url, options);
+    const out=await tick(env,{now,fetchImpl:f.fetch});
+    assert.equal(out.state,'stalled'); assert.equal(out.requiresAttention,true);
+    assert.equal(f.calls.filter(x=>x.method==='POST').length,0);
+  }
+});
+
+test('35minute boundary remains running and a newer production run still blocks duplicates', async () => {
+  const f=fake(); const original=f.fetch;
+  f.fetch=async(url, options)=>String(url).includes('/runs?') ? Response.json({workflow_runs:[{
+    head_branch:'main', display_title:'Daily HK China memo', status:'in_progress', created_at:'2026-09-16T22:00:00Z'
+  }]}) : original(url, options);
+  const out=await tick(env,{now,fetchImpl:f.fetch});
+  assert.equal(out.state,'running');
+});
+
+test('workflow gives rehearsals the explicit scheduler marker and preserves generation limit', async () => {
+  const {readFileSync}=await import('node:fs');
+  const workflow=readFileSync('.github/workflows/daily-memo.yml','utf8');
+  assert.match(workflow,/run-name: .*inputs\.dry_run.*Memo validation rehearsal.*Daily HK China memo/);
+  assert.match(workflow,/name: Generate and validate memo\n\s+timeout-minutes: 24/);
+});

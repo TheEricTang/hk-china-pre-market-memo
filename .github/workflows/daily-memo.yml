@@ -1,4 +1,5 @@
 name: Daily HK China memo
+run-name: ${{ inputs.dry_run && 'Memo validation rehearsal' || 'Daily HK China memo' }}
 
 on:
   # Re-saving this workflow on main is an explicit recovery trigger. The path
@@ -53,6 +54,8 @@ jobs:
   build-and-publish:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      MEMO_AUTOMATIC: ${{ github.event_name != 'workflow_dispatch' || inputs.automatic }}
     environment:
       name: ${{ inputs.dry_run && 'memo-validation' || 'github-pages' }}
       url: ${{ steps.deployment.outputs.page_url }}
@@ -85,6 +88,7 @@ jobs:
           GENERATE: ${{ inputs.generate }}
         run: python scripts/publication_plan.py
       - name: Generate and validate memo
+        timeout-minutes: 24
         if: steps.publish.outputs.generate_required == 'true'
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -131,5 +135,6 @@ jobs:
           path: |
             artifacts/memo-audit.json
             artifacts/memo-candidate.md
+            artifacts/publication-verification.json
           if-no-files-found: ignore
           retention-days: 14

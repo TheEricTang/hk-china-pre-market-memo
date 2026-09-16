@@ -22,11 +22,20 @@ AUDIT_STAGE_SECONDS = 600
 AUDIT_RESERVE_SECONDS = 360
 REPAIR_STAGE_SECONDS = 360
 MIN_REPAIR_SECONDS = REPAIR_STAGE_SECONDS + AUDIT_RESERVE_SECONDS
+AUTOMATIC_BUDGET_SECONDS = 22 * 60
 
 
 def stage_deadline(overall_deadline, maximum_seconds, reserve_seconds=0):
     """Bound this stage while reserving time for mandatory downstream review."""
     return min(time.monotonic() + maximum_seconds, overall_deadline - reserve_seconds)
+
+
+def generation_budget(now, configured_seconds, *, automatic, validate_only=False):
+    """Automatic research must finish by 07:55 HKT, reserving five minutes to deploy."""
+    if not automatic or validate_only:
+        return configured_seconds
+    finish_by = now.replace(hour=7, minute=55, second=0, microsecond=0)
+    return min(configured_seconds, AUTOMATIC_BUDGET_SECONDS, (finish_by - now).total_seconds())
 
 
 def diagnostic_url(url):
@@ -125,8 +134,14 @@ def stamp_cutoff(markdown, start, cutoff):
 
 
 def main() -> None:
-    now = datetime.now(HKT).replace(second=0, microsecond=0)
-    deadline = time.monotonic() + float(os.getenv("MEMO_GENERATION_BUDGET_SECONDS", "1320"))
+    started = datetime.now(HKT)
+    now = started.replace(second=0, microsecond=0)
+    budget = generation_budget(
+        started, float(os.getenv("MEMO_GENERATION_BUDGET_SECONDS", "1320")),
+        automatic=os.getenv("MEMO_AUTOMATIC") == "true",
+        validate_only=os.getenv("MEMO_VALIDATE_ONLY") == "true",
+    )
+    deadline = time.monotonic() + budget
     edition_mode = os.getenv("EDITION_MODE", "preopen")
     filename = f"memo-{now:%Y-%m-%d}.md"
     destination = ROOT / "memos" / filename
@@ -157,7 +172,8 @@ Return only finished Markdown memo. No preface, code fences, or completion note.
               "research_cutoff": now.isoformat(), "generation_started_at": datetime.now(HKT).isoformat(),
               "passed": False, "checks": [], "usage": [], "retrieval": [],
               "budgets_seconds": {"draft": DRAFT_STAGE_SECONDS, "audit": AUDIT_STAGE_SECONDS,
-                                  "audit_reserve": AUDIT_RESERVE_SECONDS, "repair": REPAIR_STAGE_SECONDS}}
+                                  "audit_reserve": AUDIT_RESERVE_SECONDS, "repair": REPAIR_STAGE_SECONDS,
+                                  "overall": budget}}
 
     def persist_report():
         artifact_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -171,6 +187,8 @@ Return only finished Markdown memo. No preface, code fences, or completion note.
         persist_report()
 
     try:
+        if budget <= 15:
+            raise TimeoutError("Insufficient time for generation and review before the 07:55 HKT cutoff")
         with OpenAI(max_retries=0, timeout=300.0) as client:
             response = request_memo(client, instruction, deadline=stage_deadline(deadline, DRAFT_STAGE_SECONDS, AUDIT_RESERVE_SECONDS))
             record_usage(response, "draft")
@@ -233,5 +251,21 @@ Return only finished Markdown memo. No preface, code fences, or completion note.
         raise
 
 
+def cli() -> None:
+    """Public Actions logs must not expose provider bodies or exception chains."""
+    try:
+        main()
+    except Exception as error:
+        if isinstance(error, APIStatusError):
+            message = f"Memo generation failed: provider HTTP {error.status_code}."
+        elif isinstance(error, APIConnectionError):
+            message = "Memo generation failed: provider connection error or timeout."
+        elif isinstance(error, IncompleteResponseError):
+            message = str(error)
+        else:
+            message = f"Memo generation failed ({type(error).__name__}); see the audit artifact for validation details."
+        raise SystemExit(message) from None
+
+
 if __name__ == "__main__":
-    main()
+    cli()

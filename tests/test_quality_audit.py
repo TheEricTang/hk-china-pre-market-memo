@@ -14,6 +14,7 @@ class QualityAuditTest(unittest.TestCase):
         self.cutoff = datetime.fromisoformat("2026-09-15T06:40:00+08:00")
         self.markdown = "\n".join(f"- Issuer {i}: Verified catalyst. [[Source](https://example.com/{i})]" for i in range(8))
         self.urls = {f"https://example.com/{i}" for i in range(8)}
+        self.queries = {f"research {area}" for area in COVERAGE_AREAS}
         self.audit = {
             "items": [{"bullet": i + 1, "supported": True, "freshness": "new",
                        "event_time_hkt": "2026-09-15T05:00:00+08:00", "source_published_at": "2026-09-15T05:30:00+08:00",
@@ -22,14 +23,14 @@ class QualityAuditTest(unittest.TestCase):
                        "source_checks": [{"url": f"https://example.com/{i}", "published_at": "2026-09-15T05:30:00+08:00",
                                           "checked_facts": ["issuer announcement confirms amount and event"]}], "issues": []}
                       for i in range(8)],
-            "coverage": [{"area": area, "queries": ["research query"],
+            "coverage": [{"area": area, "queries": [f"research {area}"],
                           "finding": "The latest official notices were checked, with no other material events found.",
                           "source_urls": ["https://example.com/0"], "missing_material_stories": []} for area in COVERAGE_AREAS],
             "editorial_issues": [],
         }
 
     def check(self, audit=None, urls=None, opened=None):
-        return validate_audit(audit or self.audit, self.markdown, self.urls if urls is None else urls, self.start, self.cutoff, {"research query"}, self.urls if opened is None else opened)
+        return validate_audit(audit or self.audit, self.markdown, self.urls if urls is None else urls, self.start, self.cutoff, self.queries, self.urls if opened is None else opened)
 
     def test_complete_evidence_passes(self):
         self.assertEqual(self.check(), [])
@@ -94,9 +95,44 @@ class QualityAuditTest(unittest.TestCase):
         self.assertTrue(any("claimed queries were not executed" in err for err in self.check()))
 
     def test_claimed_queries_allow_only_case_and_whitespace_variants(self):
-        self.audit["coverage"][0]["queries"] = [" Research   QUERY  "]
+        self.audit["coverage"][0]["queries"] = [f" Research   {COVERAGE_AREAS[0].upper()}  "]
         self.assertEqual(self.check(), [])
         self.assertEqual(normalized_query("中國  政策\n 最新"), "中國 政策 最新")
+
+    def test_one_broad_query_cannot_cover_every_area(self):
+        self.queries = {"broad market news"}
+        for check in self.audit["coverage"]:
+            check["queries"] = [" Broad   MARKET news "]
+        self.assertIn("Each coverage area must have a distinct executed research query", self.check())
+
+    def test_overlapping_queries_allow_distinct_assignment(self):
+        first, second = self.audit["coverage"][:2]
+        self.queries.update({"shared first", "unique second"})
+        first["queries"] = ["shared first", "unique second"]
+        second["queries"] = ["shared first"]
+        self.assertEqual(self.check(), [])
+
+    def test_total_query_count_does_not_resolve_area_collision(self):
+        first, second, third = self.audit["coverage"][:3]
+        second["queries"] = first["queries"].copy()
+        third["queries"].append(f"research {COVERAGE_AREAS[1]}")
+        self.assertIn("Each coverage area must have a distinct executed research query", self.check())
+
+    def test_indented_bullets_are_reviewed_like_rendered_bullets(self):
+        self.markdown = "\n".join("  " + line + "  " for line in self.markdown.splitlines())
+        self.assertEqual(self.check(), [])
+        self.audit["items"].pop()
+        self.assertIn("Audit must check every bullet exactly once", self.check())
+
+    def test_indented_bullets_cannot_pass_with_empty_review(self):
+        self.markdown = "\n".join("  " + line for line in self.markdown.splitlines())
+        self.audit["items"] = []
+        self.assertIn("Audit must check every bullet exactly once", self.check())
+
+    def test_no_bullets_and_no_review_cannot_pass(self):
+        self.markdown = "Morning Market Memo\nNo sourced news units."
+        self.audit["items"] = []
+        self.assertIn("Audit must check every bullet exactly once", self.check())
 
     def test_query_provenance_reads_both_provider_action_shapes(self):
         response = {"output": [

@@ -101,11 +101,28 @@ def parse_timestamp(value):
     return parsed
 
 
+def has_distinct_queries(query_sets):
+    """Match each area to one executed query, allowing overlapping search histories."""
+    assigned = {}
+
+    def assign(area, visited):
+        for query in sorted(query_sets[area]):
+            if query in visited:
+                continue
+            visited.add(query)
+            if query not in assigned or assign(assigned[query], visited):
+                assigned[query] = area
+                return True
+        return False
+
+    return all(assign(area, set()) for area in range(len(query_sets)))
+
+
 def validate_audit(audit, markdown, provenance, window_start, cutoff, query_provenance, opened_provenance):
     errors = []
-    bullets = [line for line in markdown.splitlines() if line.startswith("- ")]
+    bullets = [line.strip() for line in markdown.splitlines() if line.strip().startswith("- ")]
     items = audit.get("items", [])
-    if sorted(item.get("bullet", -1) for item in items) != list(range(1, len(bullets) + 1)):
+    if not bullets or not items or sorted(item.get("bullet", -1) for item in items) != list(range(1, len(bullets) + 1)):
         errors.append("Audit must check every bullet exactly once")
     recap = 0
     for item in items:
@@ -159,6 +176,7 @@ def validate_audit(audit, markdown, provenance, window_start, cutoff, query_prov
     coverage = audit.get("coverage", [])
     if sorted(item.get("area", "") for item in coverage) != sorted(COVERAGE_AREAS):
         errors.append("Independent coverage checklist is incomplete or duplicated")
+    area_queries = []
     for check in coverage:
         label = check.get("area", "unknown")
         urls = {normalized_url(url) for url in check.get("source_urls", [])}
@@ -167,8 +185,11 @@ def validate_audit(audit, markdown, provenance, window_start, cutoff, query_prov
         claimed_queries = {normalized_query(query) for query in check.get("queries", [])}
         if not claimed_queries or not claimed_queries.issubset(query_provenance):
             errors.append(f"Coverage {label}: claimed queries were not executed by the reviewer's search tool")
+        area_queries.append((claimed_queries & query_provenance) - {""})
         if check.get("missing_material_stories"):
             errors.append(f"Coverage {label}: missing material stories: {check['missing_material_stories']}")
+    if len(area_queries) != len(COVERAGE_AREAS) or not has_distinct_queries(area_queries):
+        errors.append("Each coverage area must have a distinct executed research query")
     errors.extend(f"Editorial: {issue}" for issue in audit.get("editorial_issues", []))
     return errors
 
@@ -185,7 +206,7 @@ source_urls/source_checks must exactly match that bullet's public citations. If 
 supplies an otherwise unsupported claim, fail the item and request adding that specific citation; never
 silently pass a claim supported only by an uncited source. For example, a central bank statement and
 separate projections release are different sources; policy-rate citation alone cannot support projections.
-For EVERY numbered bullet (first '- ' line is 1), check all material figures, units, currency,
+For EVERY numbered bullet (strip surrounding line whitespace; first '- ' line is 1), check all material figures, units, currency,
 comparisons, names, ticker mappings, dates, attribution, uncertainty and legal stage. Record concrete
 source evidence in your own words, a list of the checked facts, source publication timestamp and
 actual event/update/announcement timestamp with UTC offset (ISO 8601). For forward calendar items,
@@ -207,6 +228,9 @@ AI models/applications/semiconductor capacity/memory pricing; housing, retail an
 healthcare/industrial policy/commodities; earnings/buybacks/IPO/index/corporate deals and verified tickers;
 upcoming economic/earnings/IPO/index dates; same-day Chinese morning digest. For each area give actual
 search queries, concrete findings and retrieved source URLs, even when there is no material new story.
+Execute at least one distinct area-specific query for EACH coverage area. Queries may overlap across
+areas, but it must be possible to assign each area its own different executed query; one broad search
+cannot satisfy several areas' minimum research requirement.
 Copy the EXACT query strings you executed into queries (only whitespace/case normalization is allowed).
 Do not paraphrase query history. If an area has no news, cite the official index/calendar you checked;
 you need evidence of the check, not a fabricated story.
