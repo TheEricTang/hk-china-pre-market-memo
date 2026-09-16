@@ -84,3 +84,48 @@ test('does not accept an early provisional edition as the final morning memo', a
   const out=await tick(env,{now:new Date('2026-09-16T23:05:00Z'),fetchImpl:f.fetch});
   assert.equal(out.state,'dispatched');
 });
+
+test('07:40 recovery dispatch can only redeploy an approved memo without paid generation', async () => {
+  const f=fake();
+  const out=await tick(env,{now:new Date('2026-09-16T23:40:00Z'),fetchImpl:f.fetch});
+  assert.equal(out.state,'dispatched');
+  assert.equal(out.deadlineMissed,true);
+  assert.deepEqual(JSON.parse(f.calls.find(x=>x.method==='POST').body),
+    {ref:'main',inputs:{automatic:true,generate:false,edition_mode:'preopen'}});
+});
+
+test('three earlier generation dispatches leave a separate deployment recovery allowance', async () => {
+  const f=fake(); const original=f.fetch;
+  f.fetch=async(url,options)=>String(url).includes('/runs?') ? Response.json({workflow_runs:[0,1,2].map(()=>({
+    event:'workflow_dispatch',head_branch:'main',status:'completed',created_at:'2026-09-16T22:35:00Z',
+  }))}) : original(url,options);
+  const out=await tick(env,{now:new Date('2026-09-16T23:40:00Z'),fetchImpl:f.fetch});
+  assert.equal(out.state,'dispatched');
+  assert.equal(JSON.parse(f.calls.find(x=>x.method==='POST').body).inputs.generate,false);
+});
+
+test('deployment recovery stops after two late dispatches', async () => {
+  const f=fake(); const original=f.fetch;
+  f.fetch=async(url,options)=>String(url).includes('/runs?') ? Response.json({workflow_runs:[0,1].map(()=>({
+    event:'workflow_dispatch',head_branch:'main',status:'completed',created_at:'2026-09-16T23:35:00Z',
+  }))}) : original(url,options);
+  const out=await tick(env,{now:new Date('2026-09-16T23:50:00Z'),fetchImpl:f.fetch});
+  assert.equal(out.state,'recovery_exhausted');
+  assert.equal(out.deadlineMissed,true);
+  assert.equal(f.calls.filter(x=>x.method==='POST').length,0);
+});
+
+test('late recovery never duplicates an active workflow', async () => {
+  const f=fake({active:true});
+  const out=await tick(env,{now:new Date('2026-09-16T23:40:00Z'),fetchImpl:f.fetch});
+  assert.equal(out.state,'running');
+  assert.equal(out.deadlineMissed,true);
+  assert.equal(f.calls.filter(x=>x.method==='POST').length,0);
+});
+
+test('all automatic recovery dispatches stop at 08:00 HKT', async () => {
+  const f=fake();
+  const out=await tick(env,{now:new Date('2026-09-17T00:00:00Z'),fetchImpl:f.fetch});
+  assert.equal(out.state,'skipped');
+  assert.equal(f.calls.length,0);
+});

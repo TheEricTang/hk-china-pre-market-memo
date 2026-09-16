@@ -6,6 +6,7 @@ const TARGET = 7 * 60 + 30;
 const LAST_START = 7 * 60 + 30;
 const END = 8 * 60;
 const MAX_DAILY_DISPATCHES = 3;
+const MAX_DEPLOYMENT_RECOVERY_DISPATCHES = 2;
 
 function hkClock(now) {
   const hk = new Date(now.getTime() + 8 * 3600000);
@@ -70,15 +71,19 @@ export async function tick(env, { now = new Date(), fetchImpl = fetch } = {}) {
   if (runs.some(run => run.head_branch === 'main' && run.status !== 'completed')) {
     return { state: 'running', date: clock.date, deadlineMissed };
   }
-  const windowStart = Date.parse(clock.date + 'T06:35:00+08:00');
+  // Preserve a separate, bounded recovery allowance for an approved memo whose
+  // Pages deployment failed after the paid-generation window closed.
+  const deploymentOnly = clock.minutes > LAST_START;
+  const windowStart = Date.parse(clock.date + (deploymentOnly ? 'T07:31:00+08:00' : 'T06:35:00+08:00'));
   const dispatched = runs.filter(run => run.event === 'workflow_dispatch' && run.head_branch === 'main'
     && Date.parse(run.created_at) >= windowStart).length;
-  if (dispatched >= MAX_DAILY_DISPATCHES || clock.minutes > LAST_START) {
+  const dispatchLimit = deploymentOnly ? MAX_DEPLOYMENT_RECOVERY_DISPATCHES : MAX_DAILY_DISPATCHES;
+  if (dispatched >= dispatchLimit) {
     return { state: 'recovery_exhausted', date: clock.date, deadlineMissed };
   }
   const response = await fetchImpl(WORKFLOW + '/dispatches', {
     method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(10000),
-    body: JSON.stringify({ ref: 'main', inputs: { automatic: true, generate: true, edition_mode: 'preopen' } }),
+    body: JSON.stringify({ ref: 'main', inputs: { automatic: true, generate: !deploymentOnly, edition_mode: 'preopen' } }),
   });
   if (!response.ok) throw new Error(`GitHub dispatch HTTP ${response.status}`);
   return { state: 'dispatched', date: clock.date, deadlineMissed };
