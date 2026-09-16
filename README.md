@@ -13,13 +13,13 @@ Facts are reviewed in batches of at most three paragraphs, alongside a separate 
 ## Timing and recovery
 
 - Research may begin at 06:35 HKT. Automatic generation cannot start after 07:30.
-- GitHub's existing 06:40, 06:52 and 07:04 schedules are fallback triggers; GitHub can delay scheduled events.
+- Early scheduled attempts at 01:35, 02:35, 03:35 and 04:35 HKT hold a runner until the actual 06:35 research window. Waiting is capped at five hours and only marked early jobs have a six-hour outer limit; normal jobs remain at 30 minutes. The existing 06:40, 06:52 and 07:04 schedules remain as retries. GitHub can delay or drop scheduled events, so this fallback still requires observed morning acceptance.
 - The independent scheduler in `scheduler/` checks every five minutes in the morning window, triggers a non-forcing workflow, and verifies the actual public edition. It ships **disabled** until the cloud account and restricted GitHub credential are configured and tested.
 - Existing approved editions are redeployed without paying to regenerate them. Late deployment-only recovery is bounded and stops dispatching at 08:00.
 - Automatic runs reserve a deployment margin before 08:00 and explicitly fail the delivery check when live confirmation misses the 07:30 target, even if a valid edition eventually appears.
 - Failed quality checks never turn into permission to publish unchecked material. A late/missing edition remains an operational incident even if a later attempt succeeds.
 
-Do not mark delivery fixed based on repository code or unit tests alone. Activation requires a successful live research/review rehearsal, independent scheduler execution, and verification of the final page and receipt within the HKT deadline. Cloud incidents and factual-review limitations still need an operational owner; no best-effort service provides an unconditional availability guarantee.
+Do not mark delivery fixed based on repository code or unit tests alone. Daily-delivery acceptance requires a successful live research/review rehearsal, an actual scheduled morning execution, and verification of the final page and receipt within the HKT deadline. The independent scheduler additionally requires its own authenticated cloud execution. Cloud incidents and factual-review limitations still need an operational owner; no best-effort service provides an unconditional availability guarantee.
 
 ## Validation
 
