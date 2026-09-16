@@ -6,16 +6,37 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from openai import APIConnectionError, APIStatusError, OpenAI
 
 from validate_memo import validate
 from trading_calendar import is_hk_trading_day
-from quality_audit import AUDIT_SCHEMA, audit_instruction, normalized_url, retrieved_urls, validate_audit
+from quality_audit import AUDIT_SCHEMA, audit_instruction, normalized_url, opened_urls, retrieved_queries, retrieved_urls, validate_audit
 
 ROOT = Path(__file__).resolve().parents[1]
 HKT = ZoneInfo("Asia/Hong_Kong")
 RETRY_DELAYS = (15, 30, 60)
+DRAFT_STAGE_SECONDS = 600
+AUDIT_STAGE_SECONDS = 600
+AUDIT_RESERVE_SECONDS = 360
+REPAIR_STAGE_SECONDS = 360
+MIN_REPAIR_SECONDS = REPAIR_STAGE_SECONDS + AUDIT_RESERVE_SECONDS
+
+
+def stage_deadline(overall_deadline, maximum_seconds, reserve_seconds=0):
+    """Bound this stage while reserving time for mandatory downstream review."""
+    return min(time.monotonic() + maximum_seconds, overall_deadline - reserve_seconds)
+
+
+def diagnostic_url(url):
+    """Do not leak access/query credentials if a public source used a signed URL."""
+    parts = urlsplit(url)
+    sensitive = {"key", "api_key", "apikey", "token", "access_token", "auth", "authorization", "signature", "sig"}
+    pairs = [(key, "[redacted]" if key.casefold() in sensitive or key.casefold().startswith("x-amz-") else value)
+             for key, value in parse_qsl(parts.query, keep_blank_values=True)]
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(pairs), ""))
+
 
 
 def request_memo(client: OpenAI, instruction: str, *, audit=False, deadline=None):
@@ -40,6 +61,8 @@ def request_memo(client: OpenAI, instruction: str, *, audit=False, deadline=None
                 store=False,
                 **options,
             )
+            if deadline is not None and time.monotonic() > deadline:
+                raise TimeoutError("Research stage exceeded its reserved time budget")
             if response.status != "completed":
                 raise ValueError(f"Incomplete provider response: {response.status}")
             return response
@@ -112,15 +135,25 @@ Return only finished Markdown memo. No preface, code fences, or completion note.
     artifact_path.parent.mkdir(parents=True, exist_ok=True)
     report = {"schema_version": 1, "memo_filename": filename, "edition_mode": edition_mode,
               "research_cutoff": now.isoformat(), "generation_started_at": datetime.now(HKT).isoformat(),
-              "passed": False, "checks": [], "usage": []}
+              "passed": False, "checks": [], "usage": [], "retrieval": [],
+              "budgets_seconds": {"draft": DRAFT_STAGE_SECONDS, "audit": AUDIT_STAGE_SECONDS,
+                                  "audit_reserve": AUDIT_RESERVE_SECONDS, "repair": REPAIR_STAGE_SECONDS}}
+
+    def persist_report():
+        artifact_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     def record_usage(response, stage):
         usage = response.usage.model_dump() if response.usage else {}
         report["usage"].append({"stage": stage, **{key: usage.get(key) for key in ("input_tokens", "output_tokens", "total_tokens")}})
+        report["retrieval"].append({"stage": stage,
+                                    "urls": sorted(diagnostic_url(url) for url in retrieved_urls(response)),
+                                    "queries": sorted(retrieved_queries(response)),
+                                    "opened_urls": sorted(diagnostic_url(url) for url in opened_urls(response))})
+        persist_report()
 
     try:
         with OpenAI(max_retries=0, timeout=300.0) as client:
-            response = request_memo(client, instruction, deadline=deadline)
+            response = request_memo(client, instruction, deadline=stage_deadline(deadline, DRAFT_STAGE_SECONDS, AUDIT_RESERVE_SECONDS))
             record_usage(response, "draft")
             for attempt in range(2):
                 markdown = re.sub(r"\s*\(\[[^\]]+\]\(https?://[^\s)]+\)\)\s*(?=\[\[)", " ", response.output_text.strip())
@@ -129,21 +162,25 @@ Return only finished Markdown memo. No preface, code fences, or completion note.
                 errors = validate(markdown, filename, edition_mode=edition_mode, latest_cutoff=now)
                 draft_urls = retrieved_urls(response)
                 cited_urls = {url for url in re.findall(r"\]\((https?://[^)\s]+)\)", markdown)}
-                if not cited_urls or not {normalized_url(url) for url in cited_urls}.issubset(draft_urls):
+                unmatched = {normalized_url(url) for url in cited_urls} - draft_urls
+                report["retrieval"][-1]["unmatched_citations"] = sorted(diagnostic_url(url) for url in unmatched)
+                if not cited_urls or unmatched:
                     errors.append("Draft citations must come from sources retrieved during this generation")
+                persist_report()
                 audit = None
                 if not errors:
-                    checked = request_memo(client, audit_instruction(markdown, start, now), audit=True, deadline=deadline)
-                    record_usage(checked, "audit")
+                    checked = request_memo(client, audit_instruction(markdown, start, now), audit=True, deadline=stage_deadline(deadline, AUDIT_STAGE_SECONDS))
+                    record_usage(checked, "audit" if attempt == 0 else "reaudit")
                     audit = json.loads(checked.output_text)
-                    errors = validate_audit(audit, markdown, retrieved_urls(checked), start, now)
+                    errors = validate_audit(audit, markdown, retrieved_urls(checked), start, now, retrieved_queries(checked), opened_urls(checked))
                 report["checks"].append({"attempt": attempt + 1, "audit": audit, "errors": errors})
+                persist_report()
                 if not errors:
                     break
-                if attempt == 1 or deadline - time.monotonic() < 180:
+                if attempt == 1 or deadline - time.monotonic() < MIN_REPAIR_SECONDS:
                     raise ValueError("Quality gate failed: " + "; ".join(errors))
                 repair = instruction + "\nCorrect the failed draft using independently verified research. Keep the SAME cutoff.\n" + json.dumps({"previous_draft": markdown, "audit": audit, "errors": errors}, ensure_ascii=False)
-                response = request_memo(client, repair, deadline=deadline)
+                response = request_memo(client, repair, deadline=stage_deadline(deadline, REPAIR_STAGE_SECONDS, AUDIT_RESERVE_SECONDS))
                 record_usage(response, "repair")
         candidate = artifact_path.parent / "memo-candidate.md"
         candidate.parent.mkdir(parents=True, exist_ok=True)

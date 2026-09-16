@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from quality_audit import COVERAGE_AREAS, retrieved_urls, validate_audit
+from quality_audit import COVERAGE_AREAS, normalized_query, opened_urls, retrieved_queries, retrieved_urls, validate_audit
 
 
 class QualityAuditTest(unittest.TestCase):
@@ -18,7 +18,9 @@ class QualityAuditTest(unittest.TestCase):
             "items": [{"bullet": i + 1, "supported": True, "freshness": "new",
                        "event_time_hkt": "2026-09-15T05:00:00+08:00", "source_published_at": "2026-09-15T05:30:00+08:00",
                        "evidence": "The retrieved issuer notice confirms the amount, currency and event date.",
-                       "checked_facts": ["amount, currency, date"], "source_urls": [f"https://example.com/{i}"], "issues": []}
+                       "checked_facts": ["amount, currency, date"], "source_urls": [f"https://example.com/{i}"],
+                       "source_checks": [{"url": f"https://example.com/{i}", "published_at": "2026-09-15T05:30:00+08:00",
+                                          "checked_facts": ["issuer announcement confirms amount and event"]}], "issues": []}
                       for i in range(8)],
             "coverage": [{"area": area, "queries": ["research query"],
                           "finding": "The latest official notices were checked, with no other material events found.",
@@ -26,8 +28,8 @@ class QualityAuditTest(unittest.TestCase):
             "editorial_issues": [],
         }
 
-    def check(self, audit=None, urls=None):
-        return validate_audit(audit or self.audit, self.markdown, self.urls if urls is None else urls, self.start, self.cutoff)
+    def check(self, audit=None, urls=None, opened=None):
+        return validate_audit(audit or self.audit, self.markdown, self.urls if urls is None else urls, self.start, self.cutoff, {"research query"}, self.urls if opened is None else opened)
 
     def test_complete_evidence_passes(self):
         self.assertEqual(self.check(), [])
@@ -86,6 +88,64 @@ class QualityAuditTest(unittest.TestCase):
     def test_unchecked_public_link_fails(self):
         self.audit["items"][0]["source_urls"] = ["https://example.com/1"]
         self.assertTrue(any("every public citation" in err for err in self.check()))
+
+    def test_claimed_query_requires_real_tool_history(self):
+        self.audit["coverage"][0]["queries"] = ["a query the reviewer never ran"]
+        self.assertTrue(any("claimed queries were not executed" in err for err in self.check()))
+
+    def test_claimed_queries_allow_only_case_and_whitespace_variants(self):
+        self.audit["coverage"][0]["queries"] = [" Research   QUERY  "]
+        self.assertEqual(self.check(), [])
+        self.assertEqual(normalized_query("中國  政策\n 最新"), "中國 政策 最新")
+
+    def test_query_provenance_reads_both_provider_action_shapes(self):
+        response = {"output": [
+            {"type": "web_search_call", "status": "completed", "action": {"type": "search", "query": " First  Query ", "queries": ["Second Query"]}},
+            {"type": "web_search_call", "status": "failed", "action": {"type": "search", "query": "Not executed"}},
+            {"type": "message", "queries": ["Assistant claim"]},
+        ]}
+        self.assertEqual(retrieved_queries(response), {"first query", "second query"})
+
+    def test_future_secondary_source_cannot_hide_behind_primary_timestamp(self):
+        item = self.audit["items"][0]
+        item["source_urls"].append("https://example.com/1")
+        item["source_checks"].append({"url": "https://example.com/1", "published_at": "2026-09-15T07:00:00+08:00", "checked_facts": ["secondary figure"]})
+        self.assertTrue(any("checked source publication is later" in err for err in self.check()))
+
+    def test_source_checks_cover_exact_urls_once(self):
+        for checks in ([], [self.audit["items"][1]["source_checks"][0]], self.audit["items"][0]["source_checks"] * 2):
+            audit = copy.deepcopy(self.audit)
+            audit["items"][0]["source_checks"] = checks
+            self.assertTrue(any("source_checks must cover every source URL exactly once" in err for err in self.check(audit)))
+
+    def test_source_checks_require_facts_and_timezone(self):
+        for facts in ([], [""], ["   "]):
+            audit = copy.deepcopy(self.audit)
+            audit["items"][0]["source_checks"][0]["checked_facts"] = facts
+            self.assertTrue(any("every checked source must identify supported facts" in err for err in self.check(audit)))
+        for timestamp in ("", "2026-09-15", "2026-09-15T05:30:00"):
+            audit = copy.deepcopy(self.audit)
+            audit["items"][0]["source_checks"][0]["published_at"] = timestamp
+            self.assertTrue(any("every source publication timestamp must be verified" in err for err in self.check(audit)))
+
+    def test_each_checked_source_requires_actual_provenance(self):
+        item = self.audit["items"][0]
+        item["source_urls"].append("https://unretrieved.example/article")
+        item["source_checks"].append({"url": "https://unretrieved.example/article", "published_at": "2026-09-15T05:00:00+08:00", "checked_facts": ["claimed detail"]})
+        self.assertTrue(any("checked source was not retrieved" in err for err in self.check()))
+
+    def test_search_discovery_without_opening_does_not_pass(self):
+        errors = self.check(opened=set())
+        self.assertTrue(any("every public citation must be opened" in err for err in errors))
+
+    def test_only_completed_explicit_open_is_article_open_evidence(self):
+        response = {"output": [
+            {"type": "web_search_call", "status": "completed", "action": {"type": "search", "sources": [{"url": "https://example.com/search"}]}},
+            {"type": "web_search_call", "status": "completed", "action": {"type": "find_in_page", "url": "https://example.com/find"}},
+            {"type": "web_search_call", "status": "failed", "action": {"type": "open_page", "url": "https://example.com/failed"}},
+            {"type": "web_search_call", "status": "completed", "action": {"type": "open_page", "url": "https://example.com/opened"}},
+        ]}
+        self.assertEqual(opened_urls(response), {"https://example.com/opened"})
 
 
 if __name__ == "__main__":

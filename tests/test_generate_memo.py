@@ -51,7 +51,9 @@ class GenerateMemoTest(unittest.TestCase):
                        "source_published_at": "2026-09-15T05:30:00+08:00",
                        "evidence": "Official source confirms the stated event and its exact figures.",
                        "checked_facts": ["issuer, event, amount, time"],
-                       "source_urls": [f"https://example.com/{i}"], "issues": []} for i in range(8)],
+                       "source_urls": [f"https://example.com/{i}"],
+                       "source_checks": [{"url": f"https://example.com/{i}", "published_at": "2026-09-15T05:30:00+08:00",
+                                          "checked_facts": ["issuer announcement confirms amount and event"]}], "issues": []} for i in range(8)],
             "coverage": [{"area": area, "queries": ["independent query"],
                           "finding": "Verified the latest relevant notices and no additional material stories.",
                           "source_urls": ["https://example.com/0"], "missing_material_stories": []}
@@ -75,8 +77,9 @@ class GenerateMemoTest(unittest.TestCase):
             return httpx.Response(200, json={
                 "id": "resp_test", "object": "response", "created_at": 0,
                 "model": "test", "status": "completed",
-                "output": [{"id": "search_test", "type": "web_search_call", "status": "completed",
-                            "action": {"type": "search", "query": "test", "sources": [
+                "output": [{"id": f"open_{i}", "type": "web_search_call", "status": "completed",
+                            "action": {"type": "open_page", "url": f"https://example.com/{i}"}} for i in range(8)] + [{"id": "search_test", "type": "web_search_call", "status": "completed",
+                            "action": {"type": "search", "query": "independent query", "sources": [
                             {"type": "url", "url": f"https://example.com/{i}"} for i in range(8)]}},
                            {"id": "msg_test", "type": "message", "role": "assistant",
                             "status": "completed", "content": [{"type": "output_text",
@@ -215,6 +218,28 @@ class GenerateMemoTest(unittest.TestCase):
         generate_memo.main()
         self.assertIn("06:40 HKT research cutoff", self.destination.read_text())
         self.assertNotIn("09:29 HKT", self.destination.read_text())
+
+    def test_stage_deadline_reserves_required_audit_time(self):
+        with patch.object(generate_memo.time, "monotonic", return_value=100):
+            self.assertEqual(generate_memo.stage_deadline(1420, 600, 360), 700)
+            self.assertEqual(generate_memo.stage_deadline(800, 600, 360), 440)
+            self.assertEqual(generate_memo.stage_deadline(800, 600), 700)
+
+    def test_artifact_retains_actual_tool_provenance(self):
+        self.transport([200])
+        generate_memo.main()
+        artifact = json.loads((self.root / "artifacts/memo-audit.json").read_text())
+        self.assertEqual([entry["stage"] for entry in artifact["retrieval"]], ["draft", "audit"])
+        self.assertEqual(artifact["retrieval"][0]["queries"], ["independent query"])
+        self.assertEqual(artifact["retrieval"][0]["unmatched_citations"], [])
+        self.assertEqual(len(artifact["retrieval"][0]["urls"]), 8)
+        self.assertEqual(len(artifact["retrieval"][1]["opened_urls"]), 8)
+
+    def test_signed_url_values_are_redacted_in_diagnostics(self):
+        url = generate_memo.diagnostic_url("https://example.com/news?id=3&token=secret&X-Amz-Signature=hidden")
+        self.assertNotIn("secret", url)
+        self.assertNotIn("hidden", url)
+        self.assertIn("id=3", url)
 
 
 if __name__ == "__main__":

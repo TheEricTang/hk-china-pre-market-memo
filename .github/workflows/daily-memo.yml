@@ -46,7 +46,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: daily-memo
+  group: ${{ inputs.dry_run && format('memo-validation-{0}', github.ref) || 'daily-memo' }}
   cancel-in-progress: false
 
 jobs:
