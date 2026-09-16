@@ -1,4 +1,5 @@
 name: Daily HK China memo
+run-name: ${{ github.event_name == 'schedule' && github.event.schedule == '35 17-20 * * *' && 'Daily HK China memo — early runner' || 'Daily HK China memo' }}
 
 on:
   # Re-saving this workflow on main is an explicit recovery trigger. The path
@@ -26,6 +27,8 @@ on:
           - intraday
   schedule:
     # GitHub cron is expressed in UTC. Hong Kong does not observe DST.
+    # Reserve a runner before the morning queue; research still begins after 06:35 HKT.
+    - cron: "35 17-20 * * *" # 01:35, 02:35, 03:35, 04:35 HKT early-runner attempts
     - cron: "40 22 * * *" # 06:40 HKT
     - cron: "52 22 * * *" # 06:52 HKT retry
     - cron: "4 23 * * *"  # 07:04 HKT final retry
@@ -42,18 +45,28 @@ concurrency:
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: ${{ github.event_name == 'schedule' && github.event.schedule == '35 17-20 * * *' && 360 || 30 }}
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+        timeout-minutes: 2
+      - name: Wait for the actual HK research window
+        if: github.event_name == 'schedule' && github.event.schedule == '35 17-20 * * *'
+        timeout-minutes: 305
+        env:
+          MEMO_SCHEDULE: ${{ github.event.schedule }}
+        run: python scripts/wait_for_research_window.py
       - name: Sync latest published state
+        timeout-minutes: 1
         run: git pull --ff-only origin "${GITHUB_REF_NAME}"
       - name: Check HK trading day
+        timeout-minutes: 1
         id: calendar
         run: python scripts/trading_calendar.py
       - name: Check whether today's memo is already current
+        timeout-minutes: 1
         id: freshness
         shell: bash
         run: |
@@ -67,6 +80,7 @@ jobs:
             echo "No current pre-open memo for ${memo_date}; generation is required."
           fi
       - name: Decide whether this run should publish
+        timeout-minutes: 1
         id: publish
         shell: bash
         run: |
@@ -79,13 +93,16 @@ jobs:
             echo "No generation or deployment is required for this scheduled retry."
           fi
       - uses: actions/setup-python@v5
+        timeout-minutes: 2
         if: steps.publish.outputs.required == 'true'
         with:
           python-version: "3.12"
           cache: pip
       - if: steps.publish.outputs.required == 'true'
+        timeout-minutes: 2
         run: pip install -r requirements.txt
       - name: Generate and validate memo
+        timeout-minutes: 24
         if: steps.publish.outputs.required == 'true' && (inputs.generate == true || github.event_name == 'schedule' || github.event_name == 'push')
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -93,9 +110,11 @@ jobs:
           EDITION_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.edition_mode || 'preopen' }}
         run: python scripts/generate_memo.py
       - name: Build public site
+        timeout-minutes: 1
         if: steps.publish.outputs.required == 'true'
         run: python scripts/build_site.py
       - name: Save successful memo
+        timeout-minutes: 2
         if: steps.publish.outputs.required == 'true' && (inputs.generate == true || github.event_name == 'schedule' || github.event_name == 'push')
         run: |
           git config user.name "github-actions[bot]"
@@ -104,12 +123,15 @@ jobs:
           git diff --cached --quiet || git commit -m "memo: $(TZ=Asia/Hong_Kong date +%F)"
           git push
       - uses: actions/configure-pages@v5
+        timeout-minutes: 2
         if: steps.publish.outputs.required == 'true'
       - uses: actions/upload-pages-artifact@v3
+        timeout-minutes: 3
         if: steps.publish.outputs.required == 'true'
         with:
           path: docs
       - name: Deploy GitHub Pages
+        timeout-minutes: 4
         if: steps.publish.outputs.required == 'true'
         id: deployment
         uses: actions/deploy-pages@v4
