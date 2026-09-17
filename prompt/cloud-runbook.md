@@ -119,6 +119,8 @@ verify critical facts and timestamps, and search the coverage checklist for omit
 The software checks complete per-unit review, actual tool-source membership, source/event times,
 recap share, all research areas, no unresolved missing stories, and no editorial defects.
 Up to two bounded repairs, each followed by a full re-audit, are permitted within the overall budget.
+Repairs use targeted paragraph replacements/additions rather than whole-memo regeneration. Leave
+already verified paragraphs unchanged unless an explicit reported defect requires an edit.
 For each repair, work from the complete issue list: verify the disputed claim, fix or remove it,
 and confirm that earlier defects remain resolved. Preserve already-supported facts and exact links
 unless the correction requires a change. Any newly introduced claim, story or citation needs the

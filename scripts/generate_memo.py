@@ -14,6 +14,7 @@ from openai import APIConnectionError, APIStatusError, OpenAI
 from validate_memo import validate
 from trading_calendar import is_hk_trading_day
 from source_evidence import fetch_source
+from memo_repair import REPAIR_SCHEMA, apply_repair, repair_instruction
 from quality_audit import (AUDIT_SCHEMA, FACTS_AUDIT_SCHEMA, COVERAGE_AUDIT_SCHEMA, FINAL_COVERAGE_AUDIT_SCHEMA,
                            facts_audit_instruction, coverage_audit_instruction,
                            COVERAGE_AREAS, has_distinct_queries, normalized_query, completed_web_actions,
@@ -25,8 +26,8 @@ RETRY_DELAYS = (15, 30, 60)
 DISCOVERY_STAGE_SECONDS = 240
 DRAFT_STAGE_SECONDS = 600
 AUDIT_STAGE_SECONDS = 600
-AUDIT_RESERVE_SECONDS = 360
-REPAIR_STAGE_SECONDS = 180
+AUDIT_RESERVE_SECONDS = 240
+REPAIR_STAGE_SECONDS = 150
 MIN_REPAIR_SECONDS = REPAIR_STAGE_SECONDS + AUDIT_RESERVE_SECONDS
 AUTOMATIC_BUDGET_SECONDS = 22 * 60
 MAX_REPAIRS = 2
@@ -402,8 +403,9 @@ Return only finished Markdown memo. No preface, code fences, or completion note.
                 + "\n=== END UNTRUSTED RESEARCH LEADS ===\n")
             response = request_memo(client, instruction, deadline=stage_deadline(deadline, DRAFT_STAGE_SECONDS, AUDIT_RESERVE_SECONDS))
             record_usage(response, "draft")
+            candidate_text = response.output_text
             for attempt in range(MAX_REPAIRS + 1):
-                markdown = re.sub(r"\s*\(\[[^\]]+\]\(https?://[^\s)]+\)\)\s*(?=\[\[)", " ", response.output_text.strip())
+                markdown = re.sub(r"\s*\(\[[^\]]+\]\(https?://[^\s)]+\)\)\s*(?=\[\[)", " ", candidate_text.strip())
                 markdown = stamp_cutoff(markdown, start, now, title=title)
                 (artifact_path.parent / "memo-candidate.md").write_text(markdown + "\n", encoding="utf-8")
                 errors = validate(markdown, filename, edition_mode=edition_mode, latest_cutoff=now)
@@ -433,9 +435,11 @@ Return only finished Markdown memo. No preface, code fences, or completion note.
                     break
                 if attempt == MAX_REPAIRS or deadline - time.monotonic() < MIN_REPAIR_SECONDS:
                     raise ValueError("Quality gate failed: " + "; ".join(errors))
-                repair = instruction + "\nCorrect the failed draft using independently verified research. Keep the SAME cutoff.\n" + json.dumps({"previous_draft": markdown, "audit": audit, "errors": errors}, ensure_ascii=False)
-                response = request_memo(client, repair, deadline=stage_deadline(deadline, REPAIR_STAGE_SECONDS, AUDIT_RESERVE_SECONDS))
+                repair = instruction + "\nReturn the requested JSON correction patch, not a complete replacement memo.\n" + repair_instruction(markdown, audit, errors)
+                response = request_memo(client, repair, audit=True, audit_schema=REPAIR_SCHEMA,
+                                        deadline=stage_deadline(deadline, REPAIR_STAGE_SECONDS, AUDIT_RESERVE_SECONDS))
                 record_usage(response, "repair")
+                candidate_text = apply_repair(markdown, json.loads(response.output_text))
         candidate = artifact_path.parent / "memo-candidate.md"
         candidate.parent.mkdir(parents=True, exist_ok=True)
         candidate.write_text(markdown + "\n", encoding="utf-8")

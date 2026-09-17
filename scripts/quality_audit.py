@@ -27,6 +27,7 @@ _TIMESTAMP_OFFSET = r"[+-](?:(?:0[0-9]|1[0-3]):[0-5][0-9]|14:00)"
 TIMESTAMP_PATTERN = (r"^" + _TIMESTAMP_DATE + r"(?:@" + _TIMESTAMP_OFFSET
                      + r"|T(?:[01][0-9]|2[0-3]):[0-5][0-9](?::[0-5][0-9](?:\.[0-9]{1,6})?)?"
                      + r"(?:Z|" + _TIMESTAMP_OFFSET + r"))?$")
+TIMESTAMP_PATTERN = r"^(?:" + TIMESTAMP_PATTERN[1:-1] + r")?$"
 TIMESTAMP = {"type": "string", "pattern": TIMESTAMP_PATTERN}
 AUDIT_SCHEMA = obj({
     "items": {"type": "array", "items": obj({
@@ -413,6 +414,8 @@ and security are verified; do not flag abbreviation alone. Wrong/ambiguous entit
 Record concrete
 source evidence in your own words, a list of the checked facts, source publication timestamp and
 the timing of the NEWS becoming public, with an explicit event_time_basis:
+If a timestamp is genuinely unverifiable, return the empty string in that field, mark supported=false
+and explain the issue. Never invent a date to satisfy the schema; unknown timestamps block approval.
 - "event": an independently verified event/announcement time.
 - "verified_public_report": the verified publication timestamp of the ACTUALLY CITED report of a new
   announcement or material update; event_time_hkt must match that source's published_at. This means

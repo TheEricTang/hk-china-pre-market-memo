@@ -85,7 +85,9 @@ class GenerateMemoTest(unittest.TestCase):
                 complete = self.audit()
                 if is_discovery and discovery_inventory is not None:
                     complete = discovery_inventory
-                if schema_keys == {"items"}:
+                if schema_keys == {"replacements", "additions", "order"}:
+                    result = {"replacements": [], "additions": [], "order": []}
+                elif schema_keys == {"items"}:
                     batch_text = payload["input"].split("BATCH BULLETS START\n", 1)[1]
                     ids = [int(value) for value in re.findall(r"^- Item (\d+):", batch_text, re.M)]
                     result = {"items": [{**copy.deepcopy(complete["items"][global_id]), "bullet": local + 1}
@@ -187,12 +189,12 @@ class GenerateMemoTest(unittest.TestCase):
         self.sleep.assert_not_called()
         self.assertEqual(self.destination.read_text(), "Previous valid edition\n")
 
-    def test_validation_failure_is_not_retried_or_published(self):
+    def test_unstructured_invalid_draft_is_not_retried_or_published(self):
         self.memo = "Invalid memo without sources"
-        self.transport([200, 200, 200])
-        with self.assertRaises(ValueError):
+        self.transport([200])
+        with self.assertRaisesRegex(ValueError, "title and coverage header"):
             generate_memo.main()
-        self.assertEqual(len(self.requests), 4)
+        self.assertEqual(len(self.requests), 2)
         self.sleep.assert_not_called()
         self.assertEqual(self.destination.read_text(), "Previous valid edition\n")
 
@@ -374,19 +376,21 @@ class GenerateMemoTest(unittest.TestCase):
                 patch.object(generate_memo, "validate_audit", side_effect=[["repair verified factual defect"], []]):
             generate_memo.main()
         self.assertEqual(self.destination.read_text(), self.memo + "\n")
-        self.assertEqual(len([request for request in self.requests if "text" not in json.loads(request.content)]), 3)
+        self.assertEqual(len([request for request in self.requests if "text" not in json.loads(request.content)]), 1)
+        repairs = [request for request in self.requests if '"replacements"' in request.content.decode() and "Return the requested JSON correction patch" in json.loads(request.content)["input"]]
+        self.assertEqual(len(repairs), 2)
         artifact = json.loads((self.root / "artifacts/memo-audit.json").read_text())
         self.assertEqual(len(artifact["checks"]), 3)
         self.assertEqual(artifact["audit_execution"]["max_repair_rounds"], 2)
 
-    def test_ten_remaining_minutes_allow_bounded_repair_and_full_reaudit(self):
+    def test_six_and_half_remaining_minutes_allow_patch_and_full_reaudit(self):
         self.transport([200, 200])
         clock = [0.0]
         checks = []
         def review(*args, **kwargs):
             checks.append(True)
             if len(checks) == 1:
-                clock[0] = 720.0  # Reproduce the live run's 12-minute first pass.
+                clock[0] = 920.0  # Reproduce 6m40s remaining after the live second audit.
                 return ["Correct a verified factual defect"]
             return []
         with patch.object(generate_memo.time, "monotonic", side_effect=lambda: clock[0]), \
@@ -395,8 +399,10 @@ class GenerateMemoTest(unittest.TestCase):
         self.assertEqual(len(checks), 2)
         self.assertEqual(self.destination.read_text(), self.memo + "\n")
         drafts = [request for request in self.requests if "text" not in json.loads(request.content)]
-        self.assertEqual(len(drafts), 2)
-        self.assertLessEqual(drafts[-1].extensions["timeout"]["read"], 180)
+        self.assertEqual(len(drafts), 1)
+        repairs = [request for request in self.requests if "Return the requested JSON correction patch" in json.loads(request.content)["input"]]
+        self.assertEqual(len(repairs), 1)
+        self.assertLessEqual(repairs[-1].extensions["timeout"]["read"], 150)
 
     def test_unmatched_author_citation_passes_only_after_independent_verification(self):
         self.transport([200], draft_sources=False)

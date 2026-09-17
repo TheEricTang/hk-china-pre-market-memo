@@ -10,6 +10,12 @@ from quality_audit import coverage_audit_instruction, TIMESTAMP_PATTERN, facts_a
 
 
 class QualityAuditTest(unittest.TestCase):
+    def test_unknown_timestamp_is_representable_but_never_accepted(self):
+        from quality_audit import TIMESTAMP_PATTERN, timestamp_bounds
+        self.assertIsNotNone(re.fullmatch(TIMESTAMP_PATTERN, ""))
+        with self.assertRaises(ValueError):
+            timestamp_bounds("")
+
     def test_verified_boe_tracking_alias_matches_without_discarding_content_parameters(self):
         base = "https://www.bankofengland.co.uk/events/upcoming-events"
         self.assertEqual(normalized_url(base + "?trk=public_post_comment-text"), base)
