@@ -1,11 +1,12 @@
 import copy
+import re
 import sys
 import unittest
 from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from quality_audit import facts_audit_instruction, AUDIT_SCHEMA, COVERAGE_AREAS, normalized_url, normalized_query, opened_urls, retrieved_queries, timestamp_bounds, completed_web_actions, discovery_leads, validate_lead_dispositions, retrieved_urls, validate_audit
+from quality_audit import coverage_audit_instruction, TIMESTAMP_PATTERN, facts_audit_instruction, AUDIT_SCHEMA, COVERAGE_AREAS, normalized_url, normalized_query, opened_urls, retrieved_queries, timestamp_bounds, completed_web_actions, discovery_leads, validate_lead_dispositions, retrieved_urls, validate_audit
 
 
 class QualityAuditTest(unittest.TestCase):
@@ -213,6 +214,45 @@ class QualityAuditTest(unittest.TestCase):
         item["event_time_hkt"] = "2026-09-15T05:29:00+08:00"
         self.assertTrue(any("first-public-report time must match" in error for error in self.check()))
 
+    def test_timestamp_schema_constrains_all_three_fields_without_losing_date_precision(self):
+        properties = AUDIT_SCHEMA["properties"]["items"]["items"]["properties"]
+        fields = [properties["event_time_hkt"], properties["source_published_at"],
+                  properties["source_checks"]["items"]["properties"]["published_at"]]
+        valid = ["2026-09-16T17:06:00+08:00", "2026-09-16T09:06:00Z",
+                 "2026-09-16T09:06Z", "2026-09-16T09:06:00.123456-04:00",
+                 "2026-09-01", "2026-09-01@+08:00"]
+        invalid = ["2026-09-16T17:06:00+08:00; modified 2026-09-16T18:00:00+08:00",
+                   "2026-09-16T17:06:00+08:00 (original)", "2026-09-16 / 2026-09-17",
+                   "2026-09-16T17:06:00", "unknown", "2026-09-16@+08:99",
+                   "2026-09-16T25:06:00+08:00"]
+        for field in fields:
+            self.assertEqual(field["pattern"], TIMESTAMP_PATTERN)
+            for value in valid:
+                with self.subTest(value=value):
+                    self.assertIsNotNone(re.fullmatch(field["pattern"], value))
+                    timestamp_bounds(value)
+            for value in invalid:
+                with self.subTest(value=value):
+                    self.assertIsNone(re.fullmatch(field["pattern"], value))
+
+    def test_ambiguous_audit_timestamps_are_rejected_not_normalized(self):
+        for field in ("event_time_hkt", "source_published_at", "published_at"):
+            with self.subTest(field=field):
+                audit = copy.deepcopy(self.audit)
+                item = audit["items"][0]
+                target = item["source_checks"][0] if field == "published_at" else item
+                target[field] = "2026-09-15T05:30:00+08:00; modified 2026-09-15T08:00:00+08:00"
+                self.assertTrue(any("timestamp" in error for error in self.check(audit=audit)))
+        # Pattern guards serialization, not calendar correctness or eligibility.
+        with self.assertRaises(ValueError):
+            timestamp_bounds("2026-02-30T05:30:00+08:00")
+        self.audit["items"][0]["source_checks"][0]["published_at"] = "2026-09-15T08:00:00+08:00"
+        self.assertTrue(any("later than the cutoff" in error for error in self.check()))
+        prompt = facts_audit_instruction(self.markdown.splitlines(), self.start, self.cutoff)
+        self.assertIn("EXACTLY ONE", prompt)
+        self.assertIn("original/update timestamps and all qualifications in evidence", prompt)
+        self.assertIn("later-added facts existed before cutoff", prompt)
+
     def test_verified_cited_report_time_need_not_be_absolute_earliest_report(self):
         item = self.audit["items"][0]
         item.update(event_time_basis="verified_public_report",
@@ -254,6 +294,24 @@ class QualityAuditTest(unittest.TestCase):
         self.assertIn("does not require an extra", prompt)
         # Supplying text does not change the deterministic final proof requirements.
         self.assertTrue(any("must be opened" in error for error in self.check(opened=set())))
+
+    def test_coverage_prefetch_keeps_independent_queries_and_truncation_limits(self):
+        good = {"success": True, "url": "https://example.com/discovered-lead",
+                "text": "SUPPLIED COVERAGE ARTICLE", "fetched_at": "2026-09-15T06:41:00+08:00",
+                "final_url": "https://example.com/final", "content_sha256": "abc", "truncated": True,
+                "headers": "SECRET_HEADER"}
+        prompt = coverage_audit_instruction(self.markdown, self.start, self.cutoff,
+                    prefetched_sources=[good, dict(good, success=False, text="FAILED_COVERAGE_ARTICLE")])
+        self.assertIn("SUPPLIED COVERAGE ARTICLE", prompt)
+        self.assertIn('"truncated": true', prompt)
+        self.assertIn("ALL EIGHT distinct area-specific web research queries", prompt)
+        self.assertIn("absence from that excerpt does not establish", prompt)
+        self.assertIn("Every other source URL you claim must actually be retrieved", prompt)
+        self.assertIn("fetched_at is retrieval time, NEVER", prompt)
+        self.assertNotIn("SECRET_HEADER", prompt)
+        self.assertNotIn("FAILED_COVERAGE_ARTICLE", prompt)
+        without = coverage_audit_instruction(self.markdown, self.start, self.cutoff)
+        self.assertNotIn("SUPPLIED COVERAGE ARTICLE DATA START", without)
 
     def test_without_prefetch_prompt_requires_literal_open_for_every_citation(self):
         prompt = facts_audit_instruction(self.markdown.splitlines(), self.start, self.cutoff)

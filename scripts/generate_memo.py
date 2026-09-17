@@ -174,7 +174,37 @@ def parallel_audit(client, markdown, window_start, cutoff, *, deadline, record_r
 
     def review_task(prompt, schema, batch):
         fetched = []
-        if batch is not None:
+        if batch is None:
+            # Supply real retrieved article evidence to the coverage reviewer too.
+            # It still performs its own eight-area search; author text is never proof.
+            urls = set(re.findall(r"\]\((https?://[^)\s]+)\)", markdown))
+            for area in (discovery_inventory or {}).get("coverage", []):
+                urls.update(area.get("source_urls", []))
+            fetch_deadline = min(deadline - 15, time.monotonic() + 40)
+            evidence_budget = 200_000
+            with ThreadPoolExecutor(max_workers=6, thread_name_prefix="coverage-source") as source_pool:
+                def fetch_one(url):
+                    return fetch_source(url, deadline=min(fetch_deadline, time.monotonic() + 10))
+                # A bounded source set prevents unlimited work from model-written URLs.
+                futures = [source_pool.submit(fetch_one, url) for url in sorted(urls)[:40]]
+                for future in futures:
+                    item = future.result()
+                    if item.get("success") is not True:
+                        fetched.append(item)
+                        continue
+                    if evidence_budget <= 0:
+                        continue  # Unprovided text cannot become reviewer provenance.
+                    item = dict(item)
+                    original = item["text"]
+                    item["text"] = original[:min(10_000, evidence_budget)]
+                    item["truncated"] = len(item["text"]) < len(original)
+                    item["content_sha256"] = hashlib.sha256(item["text"].encode()).hexdigest()
+                    evidence_budget -= len(item["text"])
+                    fetched.append(item)
+            prompt = coverage_audit_instruction(markdown, window_start, cutoff,
+                                                discovery_inventory=discovery_inventory,
+                                                prefetched_sources=[item for item in fetched if item.get("success") is True])
+        else:
             offset, count = batch
             local_bullets = bullets[offset:offset + count]
             urls = sorted({url for line in local_bullets for url in re.findall(r"\]\((https?://[^)\s]+)\)", line)})
@@ -252,10 +282,12 @@ def coverage_start(now):
     return now.replace(year=day.year, month=day.month, day=day.day, hour=16, minute=0, second=0, microsecond=0)
 
 
-def stamp_cutoff(markdown, start, cutoff):
+def stamp_cutoff(markdown, start, cutoff, title=None):
     lines = markdown.strip().splitlines()
     if len(lines) < 2 or not lines[1].startswith("(covers "):
         return markdown.strip()
+    if title is not None and re.match(r"^#{0,6}\s*(?:Morning|Intraday) Market Memo\s*\|", lines[0]):
+        lines[0] = title
     lines[1] = f"(covers {start:%d %b} 16:00 HKT close → {cutoff:%d %b %H:%M} HKT research cutoff)"
     return "\n".join(lines)
 
@@ -372,7 +404,7 @@ Return only finished Markdown memo. No preface, code fences, or completion note.
             record_usage(response, "draft")
             for attempt in range(MAX_REPAIRS + 1):
                 markdown = re.sub(r"\s*\(\[[^\]]+\]\(https?://[^\s)]+\)\)\s*(?=\[\[)", " ", response.output_text.strip())
-                markdown = stamp_cutoff(markdown, start, now)
+                markdown = stamp_cutoff(markdown, start, now, title=title)
                 (artifact_path.parent / "memo-candidate.md").write_text(markdown + "\n", encoding="utf-8")
                 errors = validate(markdown, filename, edition_mode=edition_mode, latest_cutoff=now)
                 draft_urls = retrieved_urls(response)

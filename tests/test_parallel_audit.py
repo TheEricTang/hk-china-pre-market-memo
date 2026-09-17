@@ -126,6 +126,26 @@ class ParallelAuditTest(unittest.TestCase):
         self.assertNotIn('https://example.com/0', provenance['items'][4]['opened'])
         self.assertTrue(any('Verified publisher article body for https://example.com/0' in prompt for prompt in prompts))
         self.assertEqual(len(result['items']), 18)
+        self.assertIn('https://example.com/0', provenance['coverage']['opened'])
+        coverage_prompt = next(prompt for prompt in prompts if 'MEMO START' in prompt)
+        self.assertIn('Verified publisher article body for https://example.com/0', coverage_prompt)
+
+    def test_unprovided_coverage_articles_never_enter_evidence_provenance(self):
+        def fetch(url, **kwargs):
+            return {'success': True, 'url': url, 'final_url': url, 'text': 'x' * 12000,
+                    'fetched_at': '2026-09-15T06:41:00+08:00', 'content_sha256': 'abc', 'error': None}
+        def request(client, instruction, *, audit, audit_schema, deadline):
+            response = self.response(instruction, audit_schema)
+            response.model_dump = lambda: {'output': []}
+            return response
+        inventory = {'coverage': [{'source_urls': [f'https://news.example.com/{i}' for i in range(30)]}]}
+        with patch.object(generate_memo, 'fetch_source', side_effect=fetch), \
+                patch.object(generate_memo, 'request_memo', side_effect=request):
+            _, provenance = generate_memo.parallel_audit(object(), self.markdown, self.start, self.cutoff,
+                deadline=self.deadline, record_response=lambda *args: None, discovery_inventory=inventory)
+        # 200k total at 10k/article: fetched-but-unprovided pages do not become proof.
+        self.assertEqual(len(provenance['coverage']['opened']), 20)
+        self.assertEqual(provenance['coverage']['opened'], provenance['coverage']['urls'])
 
 
 if __name__ == '__main__':

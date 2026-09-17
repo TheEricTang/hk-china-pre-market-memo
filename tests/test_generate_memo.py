@@ -121,6 +121,15 @@ class GenerateMemoTest(unittest.TestCase):
 
         self.stack.enter_context(patch.object(generate_memo, "OpenAI", side_effect=client_factory))
 
+    def test_machine_title_corrects_markdown_heading_without_research_repair(self):
+        start = datetime(2026, 9, 14, 16, 0, tzinfo=ZoneInfo("Asia/Hong_Kong"))
+        cutoff = datetime(2026, 9, 15, 6, 40, tzinfo=ZoneInfo("Asia/Hong_Kong"))
+        expected = self.memo.splitlines()[0]
+        candidate = self.memo.replace(expected, "# " + expected, 1)
+        self.assertEqual(generate_memo.stamp_cutoff(candidate, start, cutoff, title=expected), self.memo)
+        malformed = self.memo.replace(expected, "Unrelated preface", 1)
+        self.assertTrue(generate_memo.stamp_cutoff(malformed, start, cutoff, title=expected).startswith("Unrelated preface"))
+
     def test_recovers_from_overload_after_default_sdk_retries_would_exhaust(self):
         self.transport([503, 503, 503, 200])
         try:

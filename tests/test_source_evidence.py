@@ -57,6 +57,42 @@ class SourceEvidenceTests(unittest.TestCase):
         for connection in connections:
             connection.close.assert_called_once()
 
+    def test_publication_metadata_retained_as_untrusted_distinct_from_fetch_time(self):
+        html = ("<head><meta property='article:published_time' content='2026-09-16T14:00:00-04:00'>"
+                "<meta name='dateModified' content='2026-09-16T15:00:00-04:00'>"
+                "<meta itemprop='datePublished' content='2026-09-16'>"
+                "<meta name='description' content='irrelevant metadata'></head>"
+                f"<body><time datetime='2026-09-17T02:00:00+08:00'>Release date</time>{ARTICLE}</body>")
+        result, _, _, _ = self.fetch([Response(html)])
+        self.assertTrue(result["success"])
+        self.assertIn("UNTRUSTED PAGE DATE METADATA", result["text"])
+        self.assertIn('"field": "meta.article:published_time", "value": "2026-09-16T14:00:00-04:00"', result["text"])
+        self.assertIn('"field": "meta.datemodified"', result["text"])
+        self.assertIn('"field": "meta.datepublished"', result["text"])
+        self.assertIn('"field": "time.datetime"', result["text"])
+        self.assertIn("do not establish original publication", result["text"])
+        self.assertNotIn("irrelevant metadata", result["text"])
+        self.assertNotIn(result["fetched_at"], result["text"])
+        self.assertEqual(result["content_sha256"], hashlib.sha256(result["text"].encode()).hexdigest())
+
+    def test_metadata_bounds_do_not_displace_all_visible_text(self):
+        metadata = "".join(f'<meta name="date" content="{i} ' + "x" * 1000 + '">' for i in range(40))
+        result, _, _, _ = self.fetch([Response("<head>" + metadata + "</head><body>" + ARTICLE * 100 + "</body>")])
+        self.assertTrue(result["success"])
+        self.assertEqual(result["text"].count('"field": "meta.date"'), evidence.MAX_DATE_METADATA)
+        self.assertNotIn("x" * (evidence.MAX_METADATA_VALUE + 1), result["text"])
+        self.assertEqual(len(result["text"]), evidence.MAX_TEXT)
+        self.assertIn(ARTICLE.strip(), result["text"])
+
+    def test_hidden_metadata_and_metadata_only_pages_are_not_evidence(self):
+        html = '<noscript><meta name="pubdate" content="false-date"></noscript>' + ARTICLE
+        result, _, _, _ = self.fetch([Response(html)])
+        self.assertTrue(result["success"])
+        self.assertNotIn("false-date", result["text"])
+        result, _, _, _ = self.fetch([Response('<meta name="date" content="' + "x" * 500 + '">short')])
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error"], "insufficient_text")
+
     def test_redirect_limit_is_three_hops(self):
         result, _, _, connect = self.fetch([Response(status=302, Location="/next")] * 4)
         self.assertEqual(result["error"], "redirect_limit")

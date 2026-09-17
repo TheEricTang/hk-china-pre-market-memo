@@ -4,6 +4,7 @@ import hashlib
 import http.client
 import io
 import ipaddress
+import json
 import queue
 import re
 import socket
@@ -18,6 +19,9 @@ MAX_BYTES = 1_000_000
 MAX_TEXT = 40_000
 MIN_TEXT = 120
 MAX_REDIRECTS = 3
+MAX_DATE_METADATA = 16
+MAX_METADATA_VALUE = 256
+DATE_METADATA_KEYS = {"article:published_time", "article:modified_time", "date", "datepublished", "datemodified", "pubdate"}
 AUTH_QUERY_KEYS = {"key", "api_key", "apikey", "token", "access_token", "auth", "authorization", "signature", "sig"}
 
 
@@ -146,6 +150,7 @@ class _ArticleText(HTMLParser):
         self.in_head = False
         self.in_title = False
         self.parts = []
+        self.date_metadata = []
 
     def handle_starttag(self, tag, attrs):
         if tag in ("script", "style", "noscript"):
@@ -154,6 +159,22 @@ class _ArticleText(HTMLParser):
             self.in_head = True
         if tag == "title":
             self.in_title = True
+        if not self.hidden and len(self.date_metadata) < MAX_DATE_METADATA:
+            attributes = dict(attrs)
+            field, value = None, None
+            if tag == "meta":
+                for attribute in ("property", "name", "itemprop"):
+                    key = (attributes.get(attribute) or "").casefold()
+                    if key in DATE_METADATA_KEYS:
+                        field, value = "meta." + key, attributes.get("content")
+                        break
+            elif tag == "time":
+                field, value = "time.datetime", attributes.get("datetime")
+            if isinstance(value, str):
+                value = " ".join(value.split())[:MAX_METADATA_VALUE]
+                entry = {"field": field, "value": value}
+                if value and entry not in self.date_metadata:
+                    self.date_metadata.append(entry)
 
     def handle_endtag(self, tag):
         if self.hidden and tag == self.hidden[-1]:
@@ -174,10 +195,12 @@ def _extract_text(body, content_type):
         decoded = body.decode(charset.group(1) if charset else "utf-8", errors="replace")
     except LookupError:
         raise EvidenceError("unsupported_encoding") from None
+    metadata = []
     if "html" in content_type.lower():
         parser = _ArticleText()
         parser.feed(decoded)
         decoded = " ".join(parser.parts)
+        metadata = parser.date_metadata
     text = " ".join(decoded.split())
     if len(text) < MIN_TEXT:
         raise EvidenceError("insufficient_text")
@@ -188,6 +211,14 @@ def _extract_text(body, content_type):
                       "just a moment...")))
     if blocked and len(text) < 10_000:
         raise EvidenceError("blocked_page")
+    if metadata:
+        # These are publisher claims, not verified dates. In particular, a time
+        # element can describe an event and modified_time is not published_time.
+        prefix = ("UNTRUSTED PAGE DATE METADATA (publisher-provided claims; not retrieval time; "
+                  "modified dates and time elements do not establish original publication):\n"
+                  + json.dumps(metadata, ensure_ascii=False)
+                  + "\nEND UNTRUSTED PAGE DATE METADATA\nVISIBLE PAGE TEXT:\n")
+        return prefix + text[:MAX_TEXT - len(prefix)]
     return text[:MAX_TEXT]
 
 
