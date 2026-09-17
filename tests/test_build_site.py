@@ -15,11 +15,106 @@ from publication_status import memo_hash
 class BuildSiteFreshnessTest(unittest.TestCase):
     def render_status(self, output, now):
         script = re.search(r"<script>([\s\S]*?)</script>", output).group(1)
-        setup = ("const output = {textContent:''}; const document={querySelector:()=>output};"
+        setup = ("const output = {textContent:''}; const document={querySelector:()=>output,addEventListener:()=>{}};"
                  "const setInterval=()=>{}; Date.now=()=>Date.parse(" + json.dumps(now) + ");")
         result = subprocess.run(["node", "-e", setup + script + "console.log(output.textContent);"],
                                 capture_output=True, text=True, check=True, timeout=10)
         return result.stdout.strip()
+
+    def run_browser(self, output, actions, *, receipt=None, visibility="visible", fetch_mode="normal"):
+        script = re.search(r"<script>([\s\S]*?)</script>", output).group(1)
+        setup = r"""
+const assert = require('node:assert/strict');
+let now = Date.parse('2026-09-16T23:40:00Z'); Date.now = () => now;
+const status = {textContent:''}, notice = {hidden:true}, link = {href:'./'};
+const events = {}, intervals = [], timers = [], calls = [];
+const document = {visibilityState: VISIBILITY,
+  querySelector: selector => ({'.refresh-status':status,'.edition-update':notice,'.load-latest':link})[selector],
+  addEventListener: (name, callback) => {events[name] = callback;}};
+const setInterval = callback => {intervals.push(callback);};
+const setTimeout = (callback, delay) => {const timer = {callback,delay,cleared:false}; timers.push(timer); return timer;};
+const clearTimeout = timer => {timer.cleared = true;};
+let receipt = RECEIPT, fetchMode = FETCH_MODE;
+const fetch = async (url, options) => {
+  calls.push({url, options});
+  if (fetchMode === 'offline') throw Error('Offline');
+  if (fetchMode === 'pending') return new Promise((resolve,reject) => options.signal.addEventListener('abort',()=>reject(Error('Timeout'))));
+  return {ok:fetchMode !== 'http_error', json:async()=>{
+    if (fetchMode === 'bad_json') throw Error('Invalid JSON'); return receipt;}};
+};
+const flush = () => new Promise(resolve => setImmediate(resolve));
+""".replace("VISIBILITY", json.dumps(visibility)).replace("RECEIPT", json.dumps(receipt)).replace("FETCH_MODE", json.dumps(fetch_mode))
+        result = subprocess.run(["node", "-e", "(async()=>{" + setup + script + "await flush();" + actions + "})().catch(error=>{console.error(error);process.exit(1);});"],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def receipt(self, **changes):
+        return {"schemaVersion": 1, "editionDate": "2026-09-17", "editionMode": "preopen",
+                "title": "Morning Market Memo | 17 Sep 2026 | HK/China Pre-Open",
+                "memoSha256": "b" * 64, "qualityPassed": True, **changes}
+
+    def test_open_old_tab_discovers_new_receipt_without_replacing_loaded_memo(self):
+        output = self.legacy_page(memo_sha256="a" * 64)
+        self.run_browser(output, """
+assert.match(status.textContent, /Today's edition is delayed/);
+assert.equal(notice.hidden, true); assert.equal(calls.length, 1);
+receipt = NEW_RECEIPT;
+now += 59999; intervals[0](); await flush(); assert.equal(calls.length, 1);
+now += 1; intervals[0](); await flush(); assert.equal(calls.length, 2);
+assert.match(status.textContent, /New edition available/);
+assert.match(status.textContent, /viewing the loaded 16 Sept 2026 edition/);
+assert.equal(notice.hidden, false); assert.equal(link.href, './?edition=' + 'b'.repeat(64));
+assert.equal(calls[1].options.cache, 'no-store'); assert.equal(calls[1].options.credentials, 'omit');
+assert.equal(timers[1].delay, 10000); assert.equal(timers[1].cleared, true);
+""".replace("NEW_RECEIPT", json.dumps(self.receipt())), receipt=self.receipt(
+            editionDate="2026-09-16", title="Morning Market Memo | 16 Sep 2026 | HK/China Pre-Open", memoSha256="a" * 64))
+        self.assertIn('<h1>Morning Market Memo | 16 Sep 2026 | HK/China Pre-Open</h1>', output)
+
+    def test_same_day_intraday_update_and_legacy_receipt_offer_link_without_review_claim(self):
+        receipt = self.receipt(editionDate="2026-09-16", editionMode="intraday", qualityPassed=False,
+                               title="Intraday Market Memo | 16 Sep 2026 | HK/China Update")
+        self.run_browser(self.legacy_page(memo_sha256="a" * 64), """
+assert.match(status.textContent, /New edition available/); assert.equal(notice.hidden, false);
+assert.doesNotMatch(status.textContent, /verified|reviewed|updated/i);
+""", receipt=receipt)
+
+    def test_hidden_tabs_pause_polling_and_visibility_resume_respects_throttle(self):
+        self.run_browser(self.legacy_page(memo_sha256="a" * 64), """
+assert.equal(calls.length, 0); intervals[0](); await flush(); assert.equal(calls.length, 0);
+document.visibilityState = 'visible'; events.visibilitychange(); await flush(); assert.equal(calls.length, 1);
+events.visibilitychange(); await flush(); assert.equal(calls.length, 1);
+document.visibilityState = 'hidden'; now += 60000; intervals[0](); await flush(); assert.equal(calls.length, 1);
+document.visibilityState = 'visible'; events.visibilitychange(); await flush(); assert.equal(calls.length, 2);
+""", visibility="hidden", receipt=self.receipt())
+
+    def test_archive_never_polls_or_offers_latest_link(self):
+        output = self.legacy_page(prefix="../")
+        self.run_browser(output, """
+assert.equal(calls.length, 0); assert.equal(intervals.length, 0);
+assert.equal(events.visibilitychange, undefined); assert.match(status.textContent, /Archive edition/);
+""", receipt=self.receipt())
+        self.assertNotIn('class="edition-update"', output)
+
+    def test_failed_or_malformed_receipts_leave_loaded_status_unchanged(self):
+        cases = [("offline", self.receipt()), ("http_error", self.receipt()), ("bad_json", self.receipt()),
+                 ("normal", self.receipt(memoSha256="invalid")), ("normal", self.receipt(title="wrong heading")),
+                 ("normal", self.receipt(editionDate="2026-09-15", title="Morning Market Memo | 15 Sep 2026 | HK/China Pre-Open")),
+                 ("normal", self.receipt(editionDate="2026-09-18", title="Morning Market Memo | 18 Sep 2026 | HK/China Pre-Open")),
+                 ("normal", self.receipt(memoSha256="a" * 64)), ("normal", None)]
+        for mode, receipt in cases:
+            with self.subTest(mode=mode, receipt=receipt):
+                self.run_browser(self.legacy_page(memo_sha256="a" * 64), """
+assert.match(status.textContent, /Today's edition is delayed/); assert.equal(notice.hidden, true);
+""", receipt=receipt, fetch_mode=mode)
+
+    def test_timeout_aborts_and_allows_next_check_without_concurrent_requests(self):
+        self.run_browser(self.legacy_page(memo_sha256="a" * 64), """
+assert.equal(calls.length, 1); now += 60000; intervals[0](); await flush(); assert.equal(calls.length, 1);
+assert.equal(timers[0].delay, 10000); timers[0].callback(); await flush();
+assert.equal(calls[0].options.signal.aborted, true); assert.equal(notice.hidden, true);
+fetchMode = 'normal'; intervals[0](); await flush(); assert.equal(calls.length, 2);
+assert.match(status.textContent, /New edition available/);
+""", receipt=self.receipt(), fetch_mode="pending")
 
     def legacy_page(self, **kwargs):
         return page("Morning Market Memo | 16 Sep 2026 | HK/China Pre-Open", "Research window",
