@@ -16,10 +16,15 @@ CSS = """
 :root{--paper:#f5f3ed;--ink:#171916;--muted:#686b65;--line:#d8d6ce;--accent:#174f9b}*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.58 Georgia,serif}.wrap{width:min(100% - 32px,900px);margin:auto;padding:48px 0 72px}.brand{font:700 12px/1.2 Arial,sans-serif;letter-spacing:.12em;text-transform:uppercase;border-bottom:4px solid var(--ink);padding-bottom:18px}.eyebrow,.window,.stamp{font:700 12px/1.5 Arial,sans-serif;color:var(--muted);letter-spacing:.07em}.refresh-status{display:inline-flex;margin-top:14px;padding:7px 10px;border:1px solid var(--line);border-radius:3px;color:var(--accent);font:700 12px/1.2 Arial,sans-serif;letter-spacing:.03em}h1{font-size:clamp(32px,6vw,58px);line-height:1.05;font-weight:500;letter-spacing:-.035em;margin:42px 0 12px}.memo{list-style:none;margin:32px 0;padding:0;border-top:1px solid var(--line)}.memo li{display:grid;grid-template-columns:36px 1fr;gap:12px;padding:20px 0;border-bottom:1px solid var(--line)}.num{font:11px monospace;color:#969991}.memo p{margin:0}.memo b{font-family:Arial,sans-serif;font-size:14px}.memo a{color:var(--accent);font:700 12px Arial,sans-serif;text-decoration:none}.archive{margin-top:54px;padding-top:24px;border-top:2px solid var(--ink)}.archive a{display:inline-block;margin:5px 16px 5px 0;color:var(--accent);font:13px Arial,sans-serif}.stamp{margin-top:30px}.disclaimer{margin-top:42px;color:var(--muted);font:11px Arial,sans-serif}@media(max-width:600px){.wrap{padding-top:28px}.memo li{grid-template-columns:26px 1fr}h1{margin-top:34px}}
 """
 
-FRESHNESS_SCRIPT = """<script>
+FRESHNESS_SCRIPT = r"""<script>
 (() => {
   const config = __CONFIG__;
   const el = document.querySelector('.refresh-status');
+  const notice = document.querySelector('.edition-update');
+  const latestLink = document.querySelector('.load-latest');
+  let available = null;
+  let lastCheck = -Infinity;
+  let checking = false;
   const iso = d => d.toISOString().slice(0, 10);
   const label = value => new Date(value + 'T00:00:00Z').toLocaleDateString('en-GB', {day:'2-digit', month:'short', year:'numeric', timeZone:'UTC'});
   const supported = d => Object.prototype.hasOwnProperty.call(config.holidays, String(d.getUTCFullYear()));
@@ -32,6 +37,12 @@ FRESHNESS_SCRIPT = """<script>
   function render() {
     if (config.archived) {
       el.textContent = `Archive edition · ${edition}${cutoff}`;
+      return;
+    }
+    if (available) {
+      el.textContent = `New edition available · You are viewing the loaded ${edition} edition`;
+      notice.hidden = false;
+      latestLink.href = './?edition=' + available.memoSha256;
       return;
     }
     const now = new Date(Date.now() + 8 * 60 * 60 * 1000);
@@ -58,8 +69,51 @@ FRESHNESS_SCRIPT = """<script>
       ? `Showing ${edition} · Next publication target: ${label(iso(next))}, 07:30 HKT`
       : `Showing ${edition} · Publication calendar needs updating`;
   }
+  function validNewReceipt(receipt) {
+    if (!receipt || typeof receipt !== 'object' || receipt.schemaVersion !== 1
+        || typeof receipt.editionDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(receipt.editionDate)
+        || typeof receipt.memoSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(receipt.memoSha256)
+        || receipt.memoSha256 === config.memoSha256 || receipt.editionDate < config.editionDate) return false;
+    const date = new Date(receipt.editionDate + 'T00:00:00Z');
+    if (!Number.isFinite(date.getTime()) || iso(date) !== receipt.editionDate
+        || receipt.editionDate > iso(new Date(Date.now() + 8 * 60 * 60 * 1000))) return false;
+    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const dateLabel = String(date.getUTCDate()).padStart(2, '0') + ' ' + months[date.getUTCMonth()] + ' ' + date.getUTCFullYear();
+    const title = receipt.editionMode === 'preopen' ? `Morning Market Memo | ${dateLabel} | HK/China Pre-Open`
+      : receipt.editionMode === 'intraday' ? `Intraday Market Memo | ${dateLabel} | HK/China Update` : null;
+    return title !== null && receipt.title === title;
+  }
+  async function checkPublication() {
+    if (config.archived || document.visibilityState !== 'visible' || checking || Date.now() - lastCheck < 60000) return;
+    checking = true;
+    lastCheck = Date.now();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    try {
+      const response = await fetch('./status.json?freshness=' + lastCheck,
+        {cache:'no-store', credentials:'omit', signal:controller.signal});
+      if (!response.ok) return;
+      const receipt = await response.json();
+      if (validNewReceipt(receipt)) {
+        available = receipt;
+        render();
+      }
+    } catch (_) {
+      // Keep the loaded edition and its honest status on offline/invalid responses.
+    } finally {
+      clearTimeout(timeout);
+      checking = false;
+    }
+  }
   render();
-  setInterval(render, 60000);
+  if (config.archived) return;
+  checkPublication();
+  setInterval(() => {
+    if (document.visibilityState === 'visible') { render(); checkPublication(); }
+  }, 60000);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') { render(); checkPublication(); }
+  });
 })();
 </script>"""
 
@@ -89,6 +143,7 @@ def page(title: str, window: str, bullets: list[str], memos: list[Path], prefix:
     edition_label = datetime.strptime(memo_date, "%Y-%m-%d").strftime("%d %b %Y")
     config = {
         "editionDate": memo_date,
+        "memoSha256": memo_sha256,
         "editionMode": "intraday" if title.startswith("Intraday Market Memo") else "preopen",
         "qualityPassed": reviewed,
         "researchCutoff": receipt.get("researchCutoff") if reviewed else None,
@@ -107,7 +162,8 @@ def page(title: str, window: str, bullets: list[str], memos: list[Path], prefix:
         generated = datetime.fromisoformat(receipt["generatedAt"]).astimezone(timezone(timedelta(hours=8)))
         stamp = f"Generated {generated:%d %b %Y %H:%M HKT}"
     initial_status = f"{'Archive edition' if archived else 'Edition'} · {edition_label}"
-    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><meta name="memo-sha256" content="{html.escape(memo_sha256)}"><title>{html.escape(title)}</title><style>{CSS}</style></head><body><main class="wrap"><header class="brand">HK / China Market Memo</header><div class="eyebrow">{eyebrow}</div><div class="refresh-status" role="status" aria-live="polite">{html.escape(initial_status)}</div><h1>{html.escape(title)}</h1><p class="window">{html.escape(window)}</p><ol class="memo">{items}</ol><p class="stamp">{html.escape(stamp)}</p><nav class="archive" aria-label="Memo archive"><b>Archive</b><br>{links}</nav><p class="disclaimer">Compiled from public sources. Informational only — not investment advice.</p></main>{freshness}</body></html>'''
+    update_link = '' if archived else '<div class="edition-update" hidden><a class="load-latest" href="./">Load latest edition</a></div>'
+    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><meta name="memo-sha256" content="{html.escape(memo_sha256)}"><title>{html.escape(title)}</title><style>{CSS}</style></head><body><main class="wrap"><header class="brand">HK / China Market Memo</header><div class="eyebrow">{eyebrow}</div><div class="refresh-status" role="status" aria-live="polite">{html.escape(initial_status)}</div>{update_link}<h1>{html.escape(title)}</h1><p class="window">{html.escape(window)}</p><ol class="memo">{items}</ol><p class="stamp">{html.escape(stamp)}</p><nav class="archive" aria-label="Memo archive"><b>Archive</b><br>{links}</nav><p class="disclaimer">Compiled from public sources. Informational only — not investment advice.</p></main>{freshness}</body></html>'''
 
 
 def main() -> None:
