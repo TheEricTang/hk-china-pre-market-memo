@@ -3,6 +3,7 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+  actions: read
   pages: write
   id-token: write
 concurrency:
@@ -16,7 +17,31 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
+      - name: Guard the morning publication window
+        run: |
+          cat > "$RUNNER_TEMP/check-static-window.py" <<'PYGUARD'
+          import json, os, urllib.request
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+          now=datetime.now(ZoneInfo('Asia/Hong_Kong'))
+          if now.hour*60+now.minute >= 6*60+15:
+              raise SystemExit('Use the normal generate=false deployment outside the guarded early-runner window.')
+          base='https://api.github.com/repos/'+os.environ['GITHUB_REPOSITORY']
+          def get(path):
+              request=urllib.request.Request(base+path,headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json'})
+              with urllib.request.urlopen(request,timeout=10) as response:return json.load(response)
+          runs=get('/actions/workflows/daily-memo.yml/runs?status=in_progress&per_page=100')['workflow_runs']
+          if len(runs)!=1 or runs[0]['event']!='schedule' or 'early runner' not in runs[0]['display_title']:
+              raise SystemExit('A single waiting early runner is required; use the normal deployment queue otherwise.')
+          jobs=get('/actions/runs/'+str(runs[0]['id'])+'/jobs')['jobs']
+          waiting=any(step['name']=='Wait for the actual HK research window' and step['status']=='in_progress' for job in jobs for step in job['steps'])
+          if not waiting:raise SystemExit('Morning research may be running; static publication refused.')
+          print('Early runner is waiting; bounded static publication finishes before its 06:35 HKT research window.')
+          PYGUARD
+          python "$RUNNER_TEMP/check-static-window.py"
       - uses: actions/checkout@v4
         with:
           ref: main
@@ -39,6 +64,7 @@ jobs:
           path: docs
       - name: Refuse an outdated checkout
         run: |
+          python "$RUNNER_TEMP/check-static-window.py"
           current=$(git ls-remote https://github.com/${GITHUB_REPOSITORY}.git refs/heads/main | cut -f1)
           test "$current" = "$(git rev-parse HEAD)"
       - name: Publish existing files without generating a memo
