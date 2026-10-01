@@ -54,7 +54,7 @@ class PreviewTest(unittest.TestCase):
         for path,headers in [('/api?action=edition',{'Origin':'https://evil.example'}),('/api?action=edition',{'Host':'evil.example'}),('/../db.sqlite',{}),('/public/../../db.sqlite',{})]:
             with self.assertRaises(HTTPError):self.request(path,self.token,headers=headers)
         with self.assertRaises(ValueError):private_path(REPOSITORY/'memos/private.db')
-        with self.assertRaises(ValueError):private_path(REPOSITORY/'docs/v2/../../../hk-memo-reliability-fix/docs/key')
+        with self.assertRaises(ValueError):private_path(REPOSITORY/'docs/v2/../../docs/key')
 
     def test_wrong_edition_and_admin_action_rejected(self):
         event=dict(action='feedback',item_id=self.edition['items'][0]['id'],edition_id='other',label='used',client_event_id=str(uuid4()))
