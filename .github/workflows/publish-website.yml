@@ -1,0 +1,46 @@
+name: Publish existing website files
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: static-website-publication
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Check existing publication files
+        run: |
+          test -s docs/index.html
+          test -s docs/status.json
+          test -s docs/v2/index.html
+          python - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+          receipt=json.loads(Path('docs/status.json').read_text())
+          memo=Path('memos') / ('memo-'+receipt['editionDate']+'.md')
+          assert hashlib.sha256(memo.read_bytes()).hexdigest()==receipt['memoSha256']
+          PY
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+      - name: Refuse an outdated checkout
+        run: |
+          current=$(git ls-remote https://github.com/${GITHUB_REPOSITORY}.git refs/heads/main | cut -f1)
+          test "$current" = "$(git rev-parse HEAD)"
+      - name: Publish existing files without generating a memo
+        id: deployment
+        uses: actions/deploy-pages@v4
