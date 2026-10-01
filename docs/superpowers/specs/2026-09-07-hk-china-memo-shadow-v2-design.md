@@ -332,3 +332,7 @@ These are not implementation blockers and do not weaken isolation:
 - Additional reviewers or role-based access control.
 
 The system is intentionally designed so these can be considered later without changing v1.
+
+## User amendment — 1 October 2026
+
+The user explicitly requests that successful copying itself count as a useful signal, including bulk copies, and that selection/order be tracked for future relevance. This supersedes earlier Copy-and-mark-used-only wording. Apply tracking only in authenticated private reviewer mode: copy success produces used feedback; selection snapshots are separate weak positives; unselected stories stay unknown; failed clipboard actions do not create use labels. Retain Undo, source verification, isolation and the formal preference-review gate. Anonymous public copy tools do not collect private reviewer signals before the backend is deployed.

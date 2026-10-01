@@ -42,11 +42,15 @@ def handler_for(store_path, origin):
                 if event is None:
                     edition = store.latest_edition()
                     labels = store.get_item_feedback([i['id'] for i in edition['items']], reviewer=reviewer) if edition else {}
-                    return self.reply(200, dict(edition=edition, labels=labels))
-                if event.get('action') != 'feedback':
+                    selected = store.get_selection_items(edition['id'],reviewer) if edition else []
+                    return self.reply(200, dict(edition=edition, labels=labels, selected_item_ids=selected))
+                if event.get('action') not in ('feedback','selection'):
                     return self.reply(400, {'error': 'Invalid request'})
                 try:
-                    result = store.add_feedback(reviewer, event['item_id'], event['label'], event['client_event_id'], event['edition_id'])
+                    if event['action']=='selection':
+                        result = store.add_selection(reviewer,event['edition_id'],event['selected_item_ids'],event['client_event_id'])
+                    else:
+                        result = store.add_feedback(reviewer, event['item_id'], event['label'], event['client_event_id'], event['edition_id'])
                 except (KeyError, ValueError, TypeError):
                     return self.reply(400, {'error': 'Invalid feedback'})
                 return self.reply(200, result)
@@ -80,7 +84,7 @@ def handler_for(store_path, origin):
                 return self.reply(403, {'error': 'Forbidden'})
             try:
                 size = int(self.headers.get('Content-Length', '0'))
-                if not 0 < size <= 4096 or self.headers.get('Content-Type') != 'application/json':
+                if not 0 < size <= 16384 or self.headers.get('Content-Type') != 'application/json':
                     raise ValueError()
                 event = json.loads(self.rfile.read(size))
                 if not isinstance(event, dict):

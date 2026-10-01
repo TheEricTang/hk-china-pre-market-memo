@@ -17,6 +17,12 @@ def backend():
     finally:
         if hasattr(store,'close'):store.close()
 
+def target_reviewer():
+    reviewer=os.environ.get('V2_TARGET_REVIEWER','').strip()
+    if not reviewer and os.environ.get('V2_FIXTURE')=='1':reviewer='fixture-reviewer'
+    if not reviewer:raise ValueError('target_reviewer_required')
+    return reviewer
+
 def embed(query):
     if os.getenv('V2_FIXTURE')=='1':
         values=[x/255 for x in hashlib.sha256(query.encode()).digest()]; norm=math.sqrt(sum(x*x for x in values))
@@ -42,10 +48,14 @@ def get_preference_profile(version:str='latest')->dict:
     with backend() as store:return store.get_preference_profile(version)
 
 @server.tool()
-def get_item_feedback(item_ids:list[str])->dict:
-    """Read explicit labels; unknown is unlabeled."""
+def get_item_feedback(item_ids:list[str])->CallToolResult:
+    """Read explicit labels plus separate, weaker current-selection metadata."""
     if len(item_ids)>100: raise ValueError('too_many_items')
-    with backend() as store:return store.get_item_feedback(item_ids)
+    reviewer=target_reviewer()
+    with backend() as store:
+        labels=store.get_item_feedback(item_ids,reviewer=reviewer)
+        selections=store.get_selection_signals(item_ids,reviewer=reviewer)
+    return CallToolResult(content=[TextContent(type='text',text=json.dumps(labels))],structuredContent={'result':labels},_meta={'selection_signals':selections})
 
 @server.tool()
 def check_recent_coverage(query:str,lookback_days:int=7)->CallToolResult:

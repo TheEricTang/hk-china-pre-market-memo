@@ -2,7 +2,7 @@
 const url = Deno.env.get('SUPABASE_URL')!;
 const service = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
 const origin = Deno.env.get('V2_ALLOWED_ORIGIN')!;
-const ciOperations = new Set(['register_edition','latest_edition','get_item','get_item_feedback','get_preference_profile','save_preference_profile','save_shadow_run','add_embedding','has_embedding','search_history']);
+const ciOperations = new Set(['register_edition','latest_edition','get_item','get_item_feedback','get_selection_signals','get_preference_profile','save_preference_profile','save_shadow_run','add_embedding','has_embedding','search_history']);
 Deno.serve(async (request: Request) => {
   const headers: Record<string,string> = {'Content-Type':'application/json','Cache-Control':'no-store','Vary':'Origin'};
   const requestOrigin=request.headers.get('origin');
@@ -31,7 +31,7 @@ Deno.serve(async (request: Request) => {
     }
     if (!body || typeof body!=='object') return respond({error:'invalid request'},400);
     if(request.method==='GET' && body.action!=='edition') return respond({error:'invalid request'},400);
-    if(request.method==='POST' && !['feedback','ci'].includes(body.action)) return respond({error:'invalid request'},400);
+    if(request.method==='POST' && !['feedback','selection','ci'].includes(body.action)) return respond({error:'invalid request'},400);
     if(body.action==='ci' && (!ciOperations.has(body.operation) || requestOrigin)) return respond({error:'forbidden'},403);
     const tokenHash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(match[1])))).map(x=>x.toString(16).padStart(2,'0')).join('');
     const response=await fetch(`${url}/rest/v1/rpc/memo_v2_dispatch`,{method:'POST',headers:{'Content-Type':'application/json',apikey:service,Authorization:`Bearer ${service}`},body:JSON.stringify({token_hash:tokenHash,action:body.action,args:body}),signal:AbortSignal.timeout(15000)});

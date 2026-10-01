@@ -10,14 +10,39 @@ from langgraph.graph import StateGraph,START,END
 from .policy import validate, BudgetExceeded, DEFAULT_AREA_ORDER
 from .mcp_client import retrieve,retrieve_candidates
 
-VERSIONS={'graph':'shadow-2.2','prompt':'evidence-english-audited-1','retrieval':'mcp-history-1','embedding':'text-embedding-3-small:v1'}
+VERSIONS={'graph':'shadow-2.2','prompt':'evidence-english-audited-1','retrieval':'mcp-history-2-targeted','embedding':'text-embedding-3-small:v1'}
 
 class RunState(TypedDict,total=False):
-    run_id:str; mode:str; status:str; cutoff:str; versions:dict; previous_edition:dict|None
-    preferences:dict; history:list; feedback:dict; coverage:list; cards:list; leads:list
+    run_id:str; target_reviewer:str; mode:str; status:str; cutoff:str; versions:dict; previous_edition:dict|None
+    preferences:dict; history:list; feedback:dict; selection_signals:dict; coverage:list; cards:list; leads:list
     area_reports:dict; ordered_ids:list; draft_ids:list; markdown:str; validation:dict
     repairs:int; error_code:str; evaluation:dict; accounting:dict; research_started_at:str; previous_hk_close:str; close_convention:str; source_pack:dict; paragraphs:list; draft_audit:dict; ranking:dict; repaired_paragraphs:list; retrieval_usage:list; candidate_history:dict; candidate_retrieval_usage:list
 
+
+def preference_score(card,history):
+    """Explicit labels dominate; current selections are capped weak positive evidence."""
+    terms=set(card.get('topics',[])+card.get('tickers',[])+[card['issuer']])
+    explicit=0.;matches=[];weak=0.;negative=False;seen=set()
+    for old in history:
+        if old['id'] in seen:continue
+        seen.add(old['id'])
+        common=terms.intersection(old.get('topics',[])+old.get('tickers',[])+old.get('companies',[]))
+        if not common:continue
+        similarity=max(0.,min(1.,float(old.get('similarity',0))))
+        label=old.get('label','unlabeled')
+        contribution=similarity*({'used':.25,'not_relevant':-.25}.get(label,0))
+        explicit+=contribution
+        negative=negative or label=='not_relevant'
+        selection=old.get('selection_signal',{})
+        position=selection.get('position')
+        selected=selection.get('selected') is True and isinstance(position,int) and not isinstance(position,bool) and position>=0
+        # One snapshot signal per item, independent of click/reviewer counts.
+        candidate_weak=.05*similarity/(1+position) if selected and label=='unlabeled' else 0.
+        weak=max(weak,candidate_weak)
+        matches.append({'item_id':old['id'],'label':label,'contribution':contribution,'selected':selected,'selection_position':position if selected else None,'weak_selection_candidate':candidate_weak})
+    # No weak selection may offset explicit not-relevant evidence.
+    weak=0. if negative else min(.05,weak)
+    return {'score':max(-1.,min(1.,explicit))+weak,'explicit_feedback_matches':matches,'weak_selection_contribution':weak,'selection_suppressed_by_not_relevant':negative}
 
 def persist_private_run(store,run):
     """Keep every evidence byte private while respecting the Edge 2 MB request cap."""
@@ -33,7 +58,7 @@ def persist_private_run(store,run):
         part_id=run['run_id']+':evidence:'+str(i)
         store.save_shadow_run({'id':part_id,'run_id':part_id,'parent_run_id':run['run_id'],'status':'private_evidence_part','part':i,'encoding':'gzip+base64-json','payload':payload})
         ids.append(part_id)
-    summary={key:run[key] for key in ('run_id','mode','status','cutoff','versions','repairs','error_code','evaluation','accounting','validation') if key in run}
+    summary={key:run[key] for key in ('run_id','mode','target_reviewer','status','cutoff','versions','repairs','error_code','evaluation','accounting','validation') if key in run}
     summary['private_evidence_manifest']={'encoding':'gzip+base64-json','parts':ids,'sha256':hashlib.sha256(raw).hexdigest(),'uncompressed_bytes':len(raw)}
     store.save_shadow_run(summary)
 
@@ -53,7 +78,7 @@ def build_graph(store,research,budget,checkpointer,fixture_case=None):
         now=stamp.isoformat()
         from .calendar import previous_continuous_close
         close=previous_continuous_close(stamp).isoformat()
-        return {'status':'running','cutoff':now,'research_started_at':now,'previous_hk_close':close,'close_convention':'previous_hk_continuous_session_end','versions':dict(VERSIONS,model=getattr(research,'model','fixture')),'previous_edition':store.latest_edition(),'repairs':0}
+        return {'status':'running','target_reviewer':os.environ.get('V2_TARGET_REVIEWER','fixture-reviewer' if s['mode']=='fixture' else ''),'cutoff':now,'research_started_at':now,'previous_hk_close':close,'close_convention':'previous_hk_continuous_session_end','versions':dict(VERSIONS,model=getattr(research,'model','fixture')),'previous_edition':store.latest_edition(),'repairs':0}
     def load_preferences(s):
         # Retrieval through MCP is the sole history/preferences boundary.
         return {'preferences':{},'history':[],'feedback':{},'coverage':[]}
@@ -97,18 +122,9 @@ def build_graph(store,research,budget,checkpointer,fixture_case=None):
         areas=areas if isinstance(areas,list) else []
         areas=list(dict.fromkeys([a for a in areas if a in DEFAULT_AREA_ORDER]+list(DEFAULT_AREA_ORDER)))
         for card in cards:
-            score=0.;matches=[]
-            terms=set(card.get('topics',[])+card.get('tickers',[])+[card['issuer']])
-            for old in s.get('candidate_history',{}).get(card['id'],[]):
-                common=terms.intersection(old.get('topics',[])+old.get('tickers',[])+old.get('companies',[]))
-                if not common:continue
-                similarity=max(0.,min(1.,float(old.get('similarity',0))))
-                label=old.get('label','unlabeled')
-                contribution=similarity*({'used':.25,'not_relevant':-.25}.get(label,0))
-                score+=contribution;matches.append({'item_id':old['id'],'label':label,'contribution':contribution})
+            preference=preference_score(card,s.get('candidate_history',{}).get(card['id'],[]))
             duplicate_history=any(card['statement'].strip()==old.get('body','').strip() for old in s.get('coverage',[]))
-            score=max(-1.,min(1.,score))-(.2 if duplicate_history else 0)
-            ranking[card['id']]={'score':score,'explicit_feedback_matches':matches,'recent_exact_coverage':duplicate_history}
+            ranking[card['id']]=dict(preference,score=preference['score']-(.2 if duplicate_history else 0),recent_exact_coverage=duplicate_history)
         cards.sort(key=lambda c:(areas.index(c['area']) if c['area'] in areas else len(areas),-ranking[c['id']]['score'],c['id']))
         return {'cards':cards,'leads':leads,'ordered_ids':[c['id'] for c in cards],'ranking':ranking}
     def draft(s):

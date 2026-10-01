@@ -32,4 +32,8 @@ response=await handler(new Request('https://api.example/',{method:'POST',headers
 assert.equal(response.status,403);
 response=await handler(new Request('https://api.example/',{method:'POST',headers:{authorization:'Bearer '+ 'a'.repeat(43),'content-type':'application/json'},body:JSON.stringify({action:'ci',operation:'has_embedding',arguments:{item_id:'story',model:'text-embedding-3-small',version:'1'}})}));
 assert.equal(response.status,200);assert.equal(calls.at(-1).body.args.operation,'has_embedding');
+response=await handler(new Request('https://api.example/',{method:'POST',headers:{authorization:'Bearer '+ 'a'.repeat(43),'content-type':'application/json',origin:settings.V2_ALLOWED_ORIGIN},body:JSON.stringify({action:'selection',edition_id:'edition',selected_item_ids:['story'],client_event_id:'11111111-1111-4111-8111-111111111111'})}));
+assert.equal(response.status,200);assert.equal(calls.at(-1).body.action,'selection');assert.deepEqual(Array.from(calls.at(-1).body.args.selected_item_ids),['story']);
+response=await handler(new Request('https://api.example/',{method:'POST',headers:{authorization:'Bearer '+ 'a'.repeat(43),'content-type':'application/json'},body:JSON.stringify({action:'ci',operation:'get_selection_signals',arguments:{item_ids:['story']}})}));
+assert.equal(response.status,200);assert.equal(calls.at(-1).body.args.operation,'get_selection_signals');
 console.log('Edge transport checks passed (mock RPC; live SQL not exercised).');

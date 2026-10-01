@@ -50,6 +50,33 @@ class PreviewTest(unittest.TestCase):
         with Store(self.path) as store:store.revoke_token(self.token)
         with self.assertRaises(HTTPError):self.request('/api?action=edition',self.token)
 
+    def test_selection_authenticated_order_snapshot_and_other_reviewer_privacy(self):
+        item=self.edition['items'][0]['id']
+        event=dict(action='selection',edition_id=self.edition['id'],selected_item_ids=[item],client_event_id=str(uuid4()),reviewer='spoofed')
+        with self.assertRaises(HTTPError):self.request('/api',body=event)
+        self.assertEqual(self.request('/api',self.token,event)['selected_item_ids'],[item])
+        self.assertTrue(self.request('/api',self.token,event)['saved'])
+        payload=self.request('/api?action=edition',self.token)
+        self.assertEqual(payload['selected_item_ids'],[item]);self.assertEqual(payload['labels'][item],'unlabeled')
+        with Store(self.path) as store:
+            other=store.create_reviewer_token('other')
+            ci=store.create_reviewer_token('ci','ci')
+            self.assertFalse(store.get_selection_signals([item],'spoofed')[item]['selected'])
+        self.assertEqual(self.request('/api?action=edition',other)['selected_item_ids'],[])
+        with self.assertRaises(HTTPError):self.request('/api',ci,event)
+        with self.assertRaises(HTTPError):self.request('/api',self.token,dict(event,selected_item_ids=[item,item],client_event_id=str(uuid4())))
+        with self.assertRaises(HTTPError):self.request('/api',self.token,dict(event,edition_id='missing',client_event_id=str(uuid4())))
+        self.request('/api',self.token,dict(event,selected_item_ids=[],client_event_id=str(uuid4())))
+        self.assertEqual(self.request('/api?action=edition',self.token)['selected_item_ids'],[])
+
+    def test_selection_maximum_snapshot_fits_authenticated_request(self):
+        edition=parse_edition('\n\n'.join(f'- **Story {n}:** Public fact {n}.' for n in range(100)), '2026-10-01','hundred')
+        with Store(self.path) as store:store.register_edition(edition)
+        ids=[item['id'] for item in reversed(edition['items'])]
+        event=dict(action='selection',edition_id=edition['id'],selected_item_ids=ids,client_event_id=str(uuid4()))
+        self.assertEqual(self.request('/api',self.token,event)['selected_item_ids'],ids)
+        self.assertEqual(self.request('/api?action=edition',self.token)['selected_item_ids'],ids)
+
     def test_origin_host_and_path_isolation(self):
         for path,headers in [('/api?action=edition',{'Origin':'https://evil.example'}),('/api?action=edition',{'Host':'evil.example'}),('/../db.sqlite',{}),('/public/../../db.sqlite',{})]:
             with self.assertRaises(HTTPError):self.request(path,self.token,headers=headers)

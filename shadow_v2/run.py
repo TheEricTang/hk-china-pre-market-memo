@@ -37,6 +37,9 @@ def main(argv=None):
         else:
             os.environ.pop('V2_STORE_PATH',None)
             store=SupabaseStore(os.environ['V2_BACKEND_URL'],os.environ['V2_CI_TOKEN'])
+        reviewer=os.environ.get('V2_TARGET_REVIEWER','').strip()
+        if not args.fixture and not reviewer:raise ValueError('target_reviewer_required')
+        os.environ['V2_TARGET_REVIEWER']=reviewer or 'fixture-reviewer'
         budget=Budget(args.budget_usd,args.deadline_seconds)
         if args.deadline_seconds>0:signal.setitimer(signal.ITIMER_REAL,min(args.deadline_seconds,1320))
         if args.resume:

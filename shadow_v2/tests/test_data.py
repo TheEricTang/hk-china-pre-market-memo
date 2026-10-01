@@ -185,6 +185,61 @@ class DataTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'no items'): main()
             backend.assert_not_called()
 
+    def test_selection_snapshots_order_idempotency_clear_and_privacy(self):
+        second=self.edition['items'][1]['id'];event=str(uuid.uuid4())
+        receipt=self.store.add_selection('alice',self.edition['id'],[second,self.item],event)
+        self.assertEqual(receipt['selected_item_ids'],[second,self.item])
+        self.store.add_selection('alice',self.edition['id'],[second,self.item],event)
+        self.assertEqual(self.store.db.execute('SELECT count(*) FROM selections').fetchone()[0],1)
+        signal=self.store.get_selection_signals([self.item,second],'alice')
+        self.assertEqual(signal[self.item],{'selected':True,'position':1,'selection_count':1})
+        self.assertFalse(self.store.get_selection_signals([self.item],'bob')[self.item]['selected'])
+        self.assertEqual(self.store.get_selection_items(self.edition['id'],'bob'),[])
+        with self.assertRaises(ValueError):self.store.add_selection('alice',self.edition['id'],[self.item,second],event)
+        with self.assertRaises(ValueError):self.store.add_selection('bob',self.edition['id'],[second,self.item],event)
+        self.store.add_selection('alice',self.edition['id'],[self.item],str(uuid.uuid4()))
+        self.assertEqual(self.store.get_selection_signals([self.item])[self.item]['selection_count'],1)
+        self.assertFalse(self.store.get_selection_signals([second])[second]['selected'])
+        self.store.add_selection('bob',self.edition['id'],[self.item],str(uuid.uuid4()))
+        self.assertEqual(self.store.get_selection_signals([self.item])[self.item]['selection_count'],2)
+        self.store.add_selection('alice',self.edition['id'],[],str(uuid.uuid4()))
+        self.assertFalse(self.store.get_selection_signals([self.item],'alice')[self.item]['selected'])
+        self.assertTrue(self.store.get_selection_signals([self.item])[self.item]['selected'])
+        self.assertEqual(self.store.get_item_feedback([self.item])[self.item],'unlabeled')
+
+    def test_selection_validation_membership_and_event_action_conflicts(self):
+        for selected in (None,'bad',[self.item,self.item],['missing'],[None],[''],list(map(str,range(101)))):
+            with self.assertRaises(ValueError):self.store.add_selection('alice',self.edition['id'],selected,str(uuid.uuid4()))
+        with self.assertRaises(ValueError):self.store.add_selection('alice','missing',[],str(uuid.uuid4()))
+        with self.assertRaises(ValueError):self.store.add_selection('alice',self.edition['id'],[],'invalid-uuid')
+        event=str(uuid.uuid4());self.feedback('used',event)
+        with self.assertRaises(ValueError):self.store.add_selection('alice',self.edition['id'],[],event)
+        selection_event=str(uuid.uuid4());self.store.add_selection('alice',self.edition['id'],[],selection_event)
+        with self.assertRaises(ValueError):self.feedback('used',selection_event)
+
+    def test_selection_and_feedback_share_rate_limit_retries_still_work(self):
+        event=str(uuid.uuid4());self.store.add_selection('alice',self.edition['id'],[self.item],event)
+        for _ in range(59):self.feedback('used')
+        self.assertTrue(self.store.add_selection('alice',self.edition['id'],[self.item],event)['saved'])
+        with self.assertRaisesRegex(ValueError,'rate'):self.store.add_selection('alice',self.edition['id'],[],str(uuid.uuid4()))
+        with self.assertRaisesRegex(ValueError,'rate'):self.feedback('used')
+
+    def test_new_revision_clear_supersedes_same_day_old_selection(self):
+        revision=dict(self.edition,id='new-revision',source_version='new')
+        self.store.register_edition(revision)
+        self.store.add_selection('alice',self.edition['id'],[self.item],str(uuid.uuid4()))
+        prior_day=parse_edition('- **Prior:** Old selected fact.','2026-09-29')
+        self.store.register_edition(prior_day)
+        prior_item=prior_day['items'][0]['id']
+        self.store.add_selection('alice',prior_day['id'],[prior_item],str(uuid.uuid4()))
+        self.store.add_selection('alice',revision['id'],[],str(uuid.uuid4()))
+        signals=self.store.get_selection_signals([self.item,prior_item],'alice')
+        self.assertEqual(signals[self.item],{'selected':False,'position':None,'selection_count':0})
+        self.assertTrue(signals[prior_item]['selected'])
+        self.store.add_selection('bob',self.edition['id'],[self.item],str(uuid.uuid4()))
+        self.assertTrue(self.store.get_selection_signals([self.item])[self.item]['selected'])
+        self.assertFalse(self.store.get_selection_signals([self.item],'alice')[self.item]['selected'])
+
     def test_backend_https_only(self):
         for url in ('http://x','https://user:pass@x','https://x#token'):
             with self.assertRaises(ValueError): SupabaseStore(url,'secret')

@@ -84,3 +84,42 @@ class GraphTests(unittest.TestCase):
                 result=graph.invoke({'run_id':'number-test','mode':'live'},config={'configurable':{'thread_id':'number-test'},'recursion_limit':32})
             store.close()
             self.assertEqual(result['status'],'rejected');self.assertTrue(any(x.startswith('unsupported_draft_number:') for x in result['validation']['blockers']))
+    def test_selection_is_weaker_than_used_and_position_matters(self):
+        from shadow_v2.graph import preference_score
+        card={'issuer':'Example','topics':['consumer'],'tickers':[]}
+        old={'id':'story','topics':['consumer'],'similarity':1,'label':'unlabeled','selection_signal':{'selected':True,'position':0,'selection_count':1}}
+        selected=preference_score(card,[old])['score']
+        later=preference_score(card,[dict(old,selection_signal={'selected':True,'position':3})])['score']
+        used=preference_score(card,[dict(old,label='used')])['score']
+        self.assertGreater(selected,0);self.assertLess(later,selected);self.assertLess(selected,used)
+    def test_selection_count_and_duplicate_matches_do_not_inflate(self):
+        from shadow_v2.graph import preference_score
+        card={'issuer':'Example','topics':['consumer'],'tickers':[]}
+        old={'id':'story','topics':['consumer'],'similarity':1,'label':'unlabeled','selection_signal':{'selected':True,'position':0,'selection_count':1000}}
+        one=preference_score(card,[old])['score']
+        self.assertEqual(one,preference_score(card,[old]*20)['score'])
+        self.assertEqual(one,preference_score(card,[old,dict(old,id='other-story')])['score'])
+        self.assertLessEqual(one,.05)
+    def test_not_relevant_overrides_all_weak_selection_signals(self):
+        from shadow_v2.graph import preference_score
+        card={'issuer':'Example','topics':['consumer'],'tickers':[]}
+        old={'id':'story','topics':['consumer'],'similarity':1,'label':'not_relevant','selection_signal':{'selected':True,'position':0}}
+        selected=dict(old,id='other',label='unlabeled')
+        score=preference_score(card,[old,selected])
+        self.assertEqual(score['weak_selection_contribution'],0);self.assertLess(score['score'],0)
+    def test_unselected_or_unrelated_history_is_not_negative(self):
+        from shadow_v2.graph import preference_score
+        card={'issuer':'Example','topics':['consumer'],'tickers':[]}
+        old={'id':'story','topics':['consumer'],'similarity':1,'label':'unlabeled','selection_signal':{'selected':False,'position':None}}
+        self.assertEqual(preference_score(card,[old])['score'],0)
+        self.assertEqual(preference_score(card,[dict(old,topics=['unrelated'],selection_signal={'selected':True,'position':0})])['score'],0)
+    def test_live_missing_reviewer_fails_before_model_setup(self):
+        from unittest.mock import patch
+        from shadow_v2.run import main
+        from contextlib import redirect_stdout
+        from io import StringIO
+        with redirect_stdout(StringIO()),tempfile.TemporaryDirectory() as temp,patch.dict(os.environ,{'V2_ENABLE_LIVE':'1','V2_TARGET_REVIEWER':'   '}),patch('openai.OpenAI') as client:
+            code=main(['--live','--store',temp+'/store.sqlite','--output-dir',temp+'/runs'])
+            client.assert_not_called();self.assertEqual(code,2)
+            result=json.loads(next(Path(temp+'/runs').glob('*.json')).read_text())
+            self.assertEqual(result['status'],'failed')

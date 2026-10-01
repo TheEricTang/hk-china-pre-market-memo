@@ -8,6 +8,9 @@ CREATE TABLE memo_v2.items(id text PRIMARY KEY, payload jsonb NOT NULL);
 CREATE TABLE memo_v2.membership(edition_id text REFERENCES memo_v2.editions, item_id text REFERENCES memo_v2.items, PRIMARY KEY(edition_id,item_id));
 CREATE TABLE memo_v2.tokens(hash text PRIMARY KEY, reviewer text NOT NULL, role text NOT NULL CHECK(role IN ('reviewer','ci')), revoked boolean NOT NULL DEFAULT false);
 CREATE TABLE memo_v2.events(seq bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, event_id uuid UNIQUE NOT NULL, reviewer text NOT NULL, edition_id text NOT NULL, item_id text NOT NULL, label text NOT NULL CHECK(label IN ('used','not_relevant','cleared')), created timestamptz NOT NULL DEFAULT now(), FOREIGN KEY(edition_id,item_id) REFERENCES memo_v2.membership);
+CREATE TABLE memo_v2.selections(seq bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, event_id uuid UNIQUE NOT NULL, reviewer text NOT NULL, edition_id text NOT NULL REFERENCES memo_v2.editions, selected_item_ids jsonb NOT NULL CHECK(jsonb_typeof(selected_item_ids)='array' AND jsonb_array_length(selected_item_ids)<=100), created timestamptz NOT NULL DEFAULT now());
+CREATE INDEX ON memo_v2.selections(reviewer,edition_id,seq DESC);
+CREATE INDEX ON memo_v2.selections(reviewer,created);
 CREATE TABLE memo_v2.profiles(version text PRIMARY KEY, payload jsonb NOT NULL, seq bigint GENERATED ALWAYS AS IDENTITY);
 CREATE TABLE memo_v2.runs(id text PRIMARY KEY, payload jsonb NOT NULL);
 CREATE TABLE memo_v2.embeddings(item_id text REFERENCES memo_v2.items, model text NOT NULL, version text NOT NULL, body_hash text NOT NULL, metadata jsonb NOT NULL, embedding extensions.vector(1536) NOT NULL, PRIMARY KEY(item_id,model,version));
@@ -15,7 +18,7 @@ CREATE INDEX embeddings_hnsw ON memo_v2.embeddings USING hnsw(embedding extensio
 CREATE INDEX ON memo_v2.events(item_id,seq DESC);
 CREATE INDEX ON memo_v2.events(reviewer,created);
 DO $$ DECLARE t text; BEGIN
- FOREACH t IN ARRAY ARRAY['editions','items','membership','tokens','events','profiles','runs','embeddings'] LOOP
+ FOREACH t IN ARRAY ARRAY['editions','items','membership','tokens','events','selections','profiles','runs','embeddings'] LOOP
  EXECUTE format('ALTER TABLE memo_v2.%I ENABLE ROW LEVEL SECURITY',t);
  EXECUTE format('REVOKE ALL ON memo_v2.%I FROM PUBLIC,anon,authenticated',t);
  END LOOP;
@@ -52,26 +55,49 @@ REVOKE ALL ON FUNCTION memo_v2.checked_vector(jsonb) FROM PUBLIC,anon,authentica
 -- Edge passes SHA256 token digest, never the raw token. Only service_role can invoke.
 CREATE FUNCTION public.memo_v2_dispatch(token_hash text, action text, args jsonb DEFAULT '{}'::jsonb)
 RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,memo_v2,extensions AS $$
-DECLARE principal memo_v2.tokens%ROWTYPE; existing memo_v2.events%ROWTYPE; e jsonb; i jsonb; out jsonb; op text; a jsonb; labels jsonb; query_vector extensions.vector;
+DECLARE principal memo_v2.tokens%ROWTYPE; existing memo_v2.events%ROWTYPE; selection_event memo_v2.selections%ROWTYPE; selected jsonb; e jsonb; i jsonb; out jsonb; op text; a jsonb; labels jsonb; query_vector extensions.vector;
 BEGIN
  SELECT * INTO principal FROM memo_v2.tokens WHERE hash=token_hash AND memo_v2.digest_equal(hash,token_hash) AND NOT revoked;
  IF NOT FOUND THEN RAISE EXCEPTION 'unauthorized' USING ERRCODE='28000'; END IF;
  IF action='edition' AND principal.role='reviewer' THEN
    SELECT payload INTO e FROM memo_v2.editions ORDER BY day DESC,seq DESC LIMIT 1;
    SELECT coalesce(jsonb_object_agg(x.id,coalesce(nullif((SELECT label FROM memo_v2.events WHERE item_id=x.id AND reviewer=principal.reviewer ORDER BY seq DESC LIMIT 1),'cleared'),'unlabeled')),'{}'::jsonb) INTO labels FROM jsonb_to_recordset(coalesce(e->'items','[]')) AS x(id text);
-   RETURN jsonb_build_object('edition',e,'labels',labels);
+   SELECT selected_item_ids INTO selected FROM memo_v2.selections WHERE reviewer=principal.reviewer AND edition_id=e->>'id' ORDER BY seq DESC LIMIT 1;
+   RETURN jsonb_build_object('edition',e,'labels',labels,'selected_item_ids',coalesce(selected,'[]'::jsonb));
  ELSIF action='feedback' AND principal.role='reviewer' THEN
    IF coalesce(args->>'item_id','')='' OR coalesce(args->>'edition_id','')='' OR coalesce(args->>'client_event_id','')='' OR coalesce(args->>'label','') NOT IN ('used','not_relevant','cleared') THEN RAISE EXCEPTION 'invalid feedback'; END IF;
    -- Serialize a reviewer's event stream so server order and rate checks are deterministic.
+   -- Two-key event namespace is separate from the 64-bit reviewer lock namespace.
+   -- Canonical UUID serializes cross-reviewer, cross-action replay checks first.
+   PERFORM pg_advisory_xact_lock(1,hashtext((args->>'client_event_id')::uuid::text));
    PERFORM pg_advisory_xact_lock(hashtextextended(principal.reviewer,0));
+   IF EXISTS(SELECT 1 FROM memo_v2.selections WHERE event_id=(args->>'client_event_id')::uuid) THEN RAISE EXCEPTION 'event conflict'; END IF;
    SELECT * INTO existing FROM memo_v2.events WHERE event_id=(args->>'client_event_id')::uuid;
    IF FOUND THEN
      IF existing.reviewer IS DISTINCT FROM principal.reviewer OR existing.item_id IS DISTINCT FROM args->>'item_id' OR existing.edition_id IS DISTINCT FROM args->>'edition_id' OR existing.label IS DISTINCT FROM args->>'label' THEN RAISE EXCEPTION 'event conflict'; END IF;
    ELSE
-     IF (SELECT count(*) FROM memo_v2.events WHERE reviewer=principal.reviewer AND created>now()-interval '1 minute')>=60 THEN RAISE EXCEPTION 'rate limit'; END IF;
+     IF ((SELECT count(*) FROM memo_v2.events WHERE reviewer=principal.reviewer AND created>now()-interval '1 minute')+(SELECT count(*) FROM memo_v2.selections WHERE reviewer=principal.reviewer AND created>now()-interval '1 minute'))>=60 THEN RAISE EXCEPTION 'rate limit'; END IF;
      INSERT INTO memo_v2.events(event_id,reviewer,edition_id,item_id,label) VALUES((args->>'client_event_id')::uuid,principal.reviewer,args->>'edition_id',args->>'item_id',args->>'label');
    END IF;
    RETURN jsonb_build_object('saved',true,'client_event_id',args->>'client_event_id','label',args->>'label');
+ ELSIF action='selection' AND principal.role='reviewer' THEN
+   selected:=args->'selected_item_ids';
+   IF coalesce(args->>'edition_id','')='' OR coalesce(args->>'client_event_id','')='' OR jsonb_typeof(selected) IS DISTINCT FROM 'array' THEN RAISE EXCEPTION 'invalid selection'; END IF;
+   IF jsonb_array_length(selected)>100 OR EXISTS(SELECT 1 FROM jsonb_array_elements(selected) x WHERE jsonb_typeof(x)<>'string' OR x='""'::jsonb) OR (SELECT count(DISTINCT x) FROM jsonb_array_elements(selected) x)<>jsonb_array_length(selected) THEN RAISE EXCEPTION 'invalid selection'; END IF;
+   -- Two-key event namespace is separate from the 64-bit reviewer lock namespace.
+   -- Canonical UUID serializes cross-reviewer, cross-action replay checks first.
+   PERFORM pg_advisory_xact_lock(1,hashtext((args->>'client_event_id')::uuid::text));
+   PERFORM pg_advisory_xact_lock(hashtextextended(principal.reviewer,0));
+   IF EXISTS(SELECT 1 FROM memo_v2.events WHERE event_id=(args->>'client_event_id')::uuid) THEN RAISE EXCEPTION 'event conflict'; END IF;
+   SELECT * INTO selection_event FROM memo_v2.selections WHERE event_id=(args->>'client_event_id')::uuid;
+   IF FOUND THEN
+     IF selection_event.reviewer IS DISTINCT FROM principal.reviewer OR selection_event.edition_id IS DISTINCT FROM args->>'edition_id' OR selection_event.selected_item_ids IS DISTINCT FROM selected THEN RAISE EXCEPTION 'event conflict'; END IF;
+   ELSE
+     IF NOT EXISTS(SELECT 1 FROM memo_v2.editions WHERE id=args->>'edition_id') OR EXISTS(SELECT 1 FROM jsonb_array_elements_text(selected) x WHERE NOT EXISTS(SELECT 1 FROM memo_v2.membership WHERE edition_id=args->>'edition_id' AND item_id=x)) THEN RAISE EXCEPTION 'edition mismatch'; END IF;
+     IF ((SELECT count(*) FROM memo_v2.events WHERE reviewer=principal.reviewer AND created>now()-interval '1 minute')+(SELECT count(*) FROM memo_v2.selections WHERE reviewer=principal.reviewer AND created>now()-interval '1 minute'))>=60 THEN RAISE EXCEPTION 'rate limit'; END IF;
+     INSERT INTO memo_v2.selections(event_id,reviewer,edition_id,selected_item_ids) VALUES((args->>'client_event_id')::uuid,principal.reviewer,args->>'edition_id',selected);
+   END IF;
+   RETURN jsonb_build_object('saved',true,'client_event_id',args->>'client_event_id','selected_item_ids',selected);
  ELSIF action='ci' AND principal.role='ci' THEN
    op:=args->>'operation'; a:=args->'arguments';
    CASE op
@@ -85,7 +111,15 @@ BEGIN
    WHEN 'latest_edition' THEN SELECT payload INTO out FROM memo_v2.editions ORDER BY day DESC,seq DESC LIMIT 1;
    WHEN 'get_item' THEN SELECT payload INTO out FROM memo_v2.items WHERE id=a->>'item_id';
    WHEN 'get_item_feedback' THEN
-     SELECT coalesce(jsonb_object_agg(x,coalesce(nullif((SELECT label FROM memo_v2.events WHERE item_id=x ORDER BY seq DESC LIMIT 1),'cleared'),'unlabeled')),'{}'::jsonb) INTO out FROM jsonb_array_elements_text(a->'item_ids') x;
+     SELECT coalesce(jsonb_object_agg(x,coalesce(nullif((SELECT label FROM memo_v2.events WHERE item_id=x AND (a->>'reviewer' IS NULL OR reviewer=a->>'reviewer') ORDER BY seq DESC LIMIT 1),'cleared'),'unlabeled')),'{}'::jsonb) INTO out FROM jsonb_array_elements_text(a->'item_ids') x;
+   WHEN 'get_selection_signals' THEN
+     WITH latest AS (
+       SELECT DISTINCT ON (s.reviewer,e.day) s.seq,s.selected_item_ids FROM memo_v2.selections s JOIN memo_v2.editions e ON e.id=s.edition_id
+       WHERE a->>'reviewer' IS NULL OR s.reviewer=a->>'reviewer' ORDER BY s.reviewer,e.day,s.seq DESC
+     ), active AS (
+       SELECT latest.seq,x.item_id,x.position-1 AS position FROM latest
+       CROSS JOIN LATERAL jsonb_array_elements_text(selected_item_ids) WITH ORDINALITY x(item_id,position)
+     ) SELECT coalesce(jsonb_object_agg(x,jsonb_build_object('selected',EXISTS(SELECT 1 FROM active WHERE item_id=x),'position',(SELECT position FROM active WHERE item_id=x ORDER BY seq DESC LIMIT 1),'selection_count',(SELECT count(*) FROM active WHERE item_id=x))),'{}'::jsonb) INTO out FROM jsonb_array_elements_text(a->'item_ids') x;
    WHEN 'get_preference_profile' THEN
      SELECT payload INTO out FROM memo_v2.profiles WHERE a->>'version'='latest' OR version=a->>'version' ORDER BY seq DESC LIMIT 1; out:=coalesce(out,'{}');
    WHEN 'save_preference_profile' THEN

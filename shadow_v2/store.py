@@ -25,6 +25,9 @@ class Store:
         CREATE TABLE IF NOT EXISTS membership(edition_id TEXT REFERENCES editions(id), item_id TEXT REFERENCES items(id), PRIMARY KEY(edition_id,item_id));
         CREATE TABLE IF NOT EXISTS tokens(hash TEXT PRIMARY KEY, reviewer TEXT NOT NULL, role TEXT NOT NULL, revoked INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS events(seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT UNIQUE NOT NULL, reviewer TEXT NOT NULL, edition_id TEXT NOT NULL, item_id TEXT NOT NULL, label TEXT NOT NULL, created REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS selections(seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT UNIQUE NOT NULL, reviewer TEXT NOT NULL, edition_id TEXT NOT NULL REFERENCES editions(id), selected_item_ids TEXT NOT NULL, created REAL NOT NULL);
+        CREATE INDEX IF NOT EXISTS selections_latest ON selections(reviewer,edition_id,seq DESC);
+        CREATE INDEX IF NOT EXISTS selections_rate ON selections(reviewer,created);
         CREATE TABLE IF NOT EXISTS profiles(version TEXT PRIMARY KEY, payload TEXT NOT NULL, seq INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, payload TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS embeddings(item_id TEXT REFERENCES items(id), model TEXT, version TEXT, body_hash TEXT, vector TEXT, PRIMARY KEY(item_id,model,version));
@@ -86,6 +89,7 @@ class Store:
         with self.db:
             # Transaction serializes deduplication, limits, and append ordering across workers.
             self.db.execute('BEGIN IMMEDIATE')
+            if self.db.execute('SELECT 1 FROM selections WHERE event_id=?', (client_event_id,)).fetchone(): raise ValueError('event id conflict')
             existing = self.db.execute('SELECT * FROM events WHERE event_id=?', (client_event_id,)).fetchone()
             if existing:
                 if any(existing[k] != v for k,v in dict(reviewer=reviewer,item_id=item_id,label=label,edition_id=edition_id).items()):
@@ -93,10 +97,55 @@ class Store:
             else:
                 if not self.db.execute('SELECT 1 FROM membership WHERE edition_id=? AND item_id=?', (edition_id,item_id)).fetchone():
                     raise ValueError('edition mismatch')
-                if self.db.execute('SELECT COUNT(*) FROM events WHERE reviewer=? AND created>?', (reviewer,time.time()-60)).fetchone()[0] >= 60:
+                if self._recent_event_count(reviewer) >= 60:
                     raise ValueError('rate limit')
                 self.db.execute('INSERT INTO events(event_id,reviewer,edition_id,item_id,label,created) VALUES(?,?,?,?,?,?)', (client_event_id,reviewer,edition_id,item_id,label,time.time()))
         return dict(saved=True, client_event_id=client_event_id, label=label)
+
+    def _recent_event_count(self, reviewer):
+        cutoff = time.time()-60
+        return sum(self.db.execute(f'SELECT COUNT(*) FROM {table} WHERE reviewer=? AND created>?', (reviewer,cutoff)).fetchone()[0] for table in ('events','selections'))
+
+    def add_selection(self, reviewer, edition_id, selected_item_ids, client_event_id):
+        if not reviewer or not isinstance(edition_id,str) or not edition_id: raise ValueError('invalid principal or edition')
+        uuid.UUID(client_event_id)
+        if not isinstance(selected_item_ids,list) or len(selected_item_ids)>100 or any(not isinstance(item,str) or not item for item in selected_item_ids):
+            raise ValueError('invalid selection')
+        if len(set(selected_item_ids)) != len(selected_item_ids): raise ValueError('duplicate selected item')
+        with self.db:
+            self.db.execute('BEGIN IMMEDIATE')
+            if self.db.execute('SELECT 1 FROM events WHERE event_id=?',(client_event_id,)).fetchone(): raise ValueError('event id conflict')
+            existing = self.db.execute('SELECT * FROM selections WHERE event_id=?',(client_event_id,)).fetchone()
+            if existing:
+                if existing['reviewer'] != reviewer or existing['edition_id'] != edition_id or json.loads(existing['selected_item_ids']) != selected_item_ids:
+                    raise ValueError('event id conflict')
+            else:
+                if not self.db.execute('SELECT 1 FROM editions WHERE id=?',(edition_id,)).fetchone(): raise ValueError('unknown edition')
+                for item_id in selected_item_ids:
+                    if not self.db.execute('SELECT 1 FROM membership WHERE edition_id=? AND item_id=?',(edition_id,item_id)).fetchone():
+                        raise ValueError('edition mismatch')
+                if self._recent_event_count(reviewer) >= 60: raise ValueError('rate limit')
+                self.db.execute('INSERT INTO selections(event_id,reviewer,edition_id,selected_item_ids,created) VALUES(?,?,?,?,?)',
+                                (client_event_id,reviewer,edition_id,json.dumps(selected_item_ids),time.time()))
+        return dict(saved=True,client_event_id=client_event_id,selected_item_ids=list(selected_item_ids))
+
+    def get_selection_items(self, edition_id, reviewer):
+        row = self.db.execute('SELECT selected_item_ids FROM selections WHERE edition_id=? AND reviewer=? ORDER BY seq DESC LIMIT 1',(edition_id,reviewer)).fetchone()
+        return json.loads(row[0]) if row else []
+
+    def get_selection_signals(self, item_ids, reviewer=None):
+        # Absence only means no current weak-positive evidence. It is never a negative label.
+        result = {item_id:dict(selected=False,position=None,selection_count=0) for item_id in item_ids}
+        query = 'SELECT * FROM selections WHERE seq IN (SELECT MAX(s.seq) FROM selections s JOIN editions e ON e.id=s.edition_id'
+        args = []
+        if reviewer is not None: query += ' WHERE s.reviewer=?'; args.append(reviewer)
+        query += ' GROUP BY s.reviewer,e.day) ORDER BY seq'
+        for row in self.db.execute(query,args):
+            for position,item_id in enumerate(json.loads(row['selected_item_ids'])):
+                if item_id in result:
+                    signal = result[item_id]
+                    signal.update(selected=True,position=position,selection_count=signal['selection_count']+1)
+        return result
 
     def get_item_feedback(self, item_ids, reviewer=None):
         result = {}

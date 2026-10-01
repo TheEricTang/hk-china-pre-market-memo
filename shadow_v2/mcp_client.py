@@ -7,7 +7,7 @@ from datetime import timedelta
 
 @asynccontextmanager
 async def history_session(timeout=60):
-    allowed=('PATH','PYTHONPATH','V2_STORE_PATH','V2_BACKEND_URL','V2_CI_TOKEN','V2_OPENAI_API_KEY','V2_FIXTURE')
+    allowed=('PATH','PYTHONPATH','V2_STORE_PATH','V2_BACKEND_URL','V2_CI_TOKEN','V2_OPENAI_API_KEY','V2_FIXTURE','V2_TARGET_REVIEWER')
     env={k:os.environ[k] for k in allowed if k in os.environ}
     env.update(LANGCHAIN_TRACING_V2='false',LANGSMITH_TRACING='false')
     params=StdioServerParameters(command=sys.executable,args=['-m','shadow_v2.mcp_server'],env=env)
@@ -32,15 +32,27 @@ async def call(session,name,args,usage_sink=None):
         return values[0] if len(values)==1 and isinstance(values[0],list) else values
     return json.loads(''.join(texts))
 
+async def feedback_with_selections(session,item_ids):
+    """Keep explicit feedback and latest-snapshot selections distinct."""
+    ids=list(dict.fromkeys(item_ids));labels={};signals={}
+    for offset in range(0,len(ids),100):
+        metadata=[]
+        labels.update(await call(session,'get_item_feedback',{'item_ids':ids[offset:offset+100]},metadata))
+        for entry in metadata:signals.update(entry.get('selection_signals',{}))
+    return labels,signals
+
 async def retrieve_async(query,timeout):
     async with asyncio.timeout(timeout):
         async with history_session(timeout) as session:
             usage=[]
             preferences=await call(session,'get_preference_profile',{'version':'latest'})
             history=await call(session,'search_memo_history',{'query':query,'limit':10},usage)
-            feedback=await call(session,'get_item_feedback',{'item_ids':[x['id'] for x in history]})
             coverage=await call(session,'check_recent_coverage',{'query':query,'lookback_days':7},usage)
-            return {'preferences':preferences,'history':history,'feedback':feedback,'coverage':coverage,'retrieval_usage':usage}
+            feedback,selections=await feedback_with_selections(session,[x['id'] for x in history+coverage])
+            for item in history+coverage:
+                item['label']=feedback.get(item['id'],'unlabeled')
+                item['selection_signal']=selections.get(item['id'],{})
+            return {'preferences':preferences,'history':history,'feedback':feedback,'selection_signals':selections,'coverage':coverage,'retrieval_usage':usage}
 
 def retrieve(query,timeout=90): return asyncio.run(retrieve_async(query,timeout))
 
@@ -53,6 +65,11 @@ async def candidate_retrieval_async(cards,timeout):
             for card in cards:
                 query=(card['issuer']+' '+card['statement'])[:2000]
                 results[card['id']]=await call(session,'search_memo_history',{'query':query,'tickers':card.get('tickers') or None,'limit':8},usage)
+            labels,signals=await feedback_with_selections(session,[item['id'] for matches in results.values() for item in matches])
+            for matches in results.values():
+                for item in matches:
+                    item['label']=labels.get(item['id'],'unlabeled')
+                    item['selection_signal']=signals.get(item['id'],{})
             return {'candidate_history':results,'candidate_retrieval_usage':usage}
 
 def retrieve_candidates(cards,timeout=90):return asyncio.run(candidate_retrieval_async(cards,timeout))

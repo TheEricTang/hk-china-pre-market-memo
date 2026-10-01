@@ -44,6 +44,7 @@ jobs:
           V2_OPENAI_API_KEY: ${{ secrets.V2_OPENAI_API_KEY }}
           V2_RATE_CARD: ${{ vars.V2_RATE_CARD }}
           V2_MODEL: gpt-5.6-sol
+          V2_TARGET_REVIEWER: ${{ vars.V2_TARGET_REVIEWER }}
           LANGCHAIN_TRACING_V2: 'false'
           LANGSMITH_TRACING: 'false'
         run: python -m shadow_v2.run --live --cloud --output-dir "$RUNNER_TEMP/hk-memo-v2-private" --budget-usd 10 --deadline-seconds 1320
