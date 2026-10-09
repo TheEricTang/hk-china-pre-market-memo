@@ -1,0 +1,51 @@
+name: HK China memo shadow v2
+run-name: HK China shadow v2 — private experiment
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '45 22 * * 0-4' # 06:45 HKT weekdays; shadow timing is measured independently.
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hk-memo-shadow-v2
+  cancel-in-progress: false
+
+jobs:
+  shadow:
+    if: vars.V2_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 28
+    environment: hk-memo-shadow-v2
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: shadow_v2/requirements.txt
+      - name: Install isolated v2 dependencies
+        timeout-minutes: 3
+        run: pip install -r shadow_v2/requirements.txt
+      - name: Check HK trading date
+        id: calendar
+        run: python scripts/trading_calendar.py
+      - name: Research and store private shadow edition
+        if: steps.calendar.outputs.is_trading_day == 'true'
+        timeout-minutes: 23
+        env:
+          V2_ENABLE_LIVE: '1'
+          V2_BACKEND_URL: ${{ secrets.V2_BACKEND_URL }}
+          V2_CI_TOKEN: ${{ secrets.V2_CI_TOKEN }}
+          V2_OPENAI_API_KEY: ${{ secrets.V2_OPENAI_API_KEY }}
+          V2_RATE_CARD: ${{ vars.V2_RATE_CARD }}
+          V2_MODEL: gpt-5.6-sol
+          V2_TARGET_REVIEWER: ${{ vars.V2_TARGET_REVIEWER }}
+          LANGCHAIN_TRACING_V2: 'false'
+          LANGSMITH_TRACING: 'false'
+        run: python -m shadow_v2.run --live --cloud --output-dir "$RUNNER_TEMP/hk-memo-v2-private" --budget-usd 10 --deadline-seconds 1320
+      # No Pages deploy, git push, v1 dependency, public artifact or publication permission.
