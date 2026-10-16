@@ -1,5 +1,5 @@
 name: Daily HK China memo
-run-name: ${{ github.event_name == 'schedule' && github.event.schedule == '35 17-20 * * *' && 'Daily HK China memo — early runner' || 'Daily HK China memo' }}
+run-name: ${{ inputs.dry_run && 'Memo validation rehearsal' || github.event_name == 'schedule' && github.event.schedule == '35 17-20 * * *' && 'Daily HK China memo — early runner' || 'Daily HK China memo' }}
 
 on:
   # Re-saving this workflow on main is an explicit recovery trigger. The path
@@ -12,6 +12,16 @@ on:
       - .github/memo-kick.txt
   workflow_dispatch:
     inputs:
+      dry_run:
+        description: Generate and review an edition without committing or publishing it
+        required: true
+        default: false
+        type: boolean
+      automatic:
+        description: Respect HK trading days and skip generation of an existing edition
+        required: true
+        default: false
+        type: boolean
       generate:
         description: Generate a new memo before deployment
         required: true
@@ -39,15 +49,17 @@ permissions:
   id-token: write
 
 concurrency:
-  group: daily-memo
+  group: ${{ inputs.dry_run && format('memo-validation-{0}', github.ref) || 'daily-memo' }}
   cancel-in-progress: false
 
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
     timeout-minutes: ${{ github.event_name == 'schedule' && github.event.schedule == '35 17-20 * * *' && 360 || 30 }}
+    env:
+      MEMO_AUTOMATIC: ${{ github.event_name != 'workflow_dispatch' || inputs.automatic }}
     environment:
-      name: github-pages
+      name: ${{ inputs.dry_run && 'memo-validation' || 'github-pages' }}
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
@@ -61,37 +73,13 @@ jobs:
       - name: Sync latest published state
         timeout-minutes: 1
         run: git pull --ff-only origin "${GITHUB_REF_NAME}"
-      - name: Check HK trading day
-        timeout-minutes: 1
-        id: calendar
-        run: python scripts/trading_calendar.py
-      - name: Check whether today's memo is already current
-        timeout-minutes: 1
-        id: freshness
-        shell: bash
-        run: |
-          memo_date="$(TZ=Asia/Hong_Kong date +%F)"
-          expected_title="Morning Market Memo | $(TZ=Asia/Hong_Kong date '+%d %b %Y') | HK/China Pre-Open"
-          if python scripts/memo_freshness.py "memos/memo-${memo_date}.md" "$expected_title"; then
-            echo "already_current=true" >> "$GITHUB_OUTPUT"
-            echo "A pre-open memo for ${memo_date} already exists; the scheduled retry will stop."
-          else
-            echo "already_current=false" >> "$GITHUB_OUTPUT"
-            echo "No current pre-open memo for ${memo_date}; generation is required."
-          fi
       - name: Decide whether this run should publish
         timeout-minutes: 1
         id: publish
-        shell: bash
-        run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "required=true" >> "$GITHUB_OUTPUT"
-          elif [[ "${{ steps.calendar.outputs.is_trading_day }}" == "true" && "${{ steps.freshness.outputs.already_current }}" != "true" ]]; then
-            echo "required=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "required=false" >> "$GITHUB_OUTPUT"
-            echo "No generation or deployment is required for this scheduled retry."
-          fi
+        env:
+          AUTOMATIC: ${{ inputs.automatic }}
+          GENERATE: ${{ inputs.generate }}
+        run: python scripts/publication_plan.py
       - uses: actions/setup-python@v5
         timeout-minutes: 2
         if: steps.publish.outputs.required == 'true'
@@ -101,21 +89,39 @@ jobs:
       - if: steps.publish.outputs.required == 'true'
         timeout-minutes: 2
         run: pip install -r requirements.txt
+      - name: Run regression tests
+        timeout-minutes: 2
+        if: steps.publish.outputs.required == 'true'
+        run: |
+          python -m unittest discover -s tests -v
+          node --test scheduler/worker.test.mjs
+      - name: Recheck generation deadline after setup
+        timeout-minutes: 1
+        if: steps.publish.outputs.generate_required == 'true'
+        env:
+          AUTOMATIC: ${{ inputs.automatic }}
+          GENERATE: ${{ inputs.generate }}
+        run: python scripts/publication_plan.py
       - name: Generate and validate memo
         timeout-minutes: 24
-        if: steps.publish.outputs.required == 'true' && (inputs.generate == true || github.event_name == 'schedule' || github.event_name == 'push')
+        if: steps.publish.outputs.generate_required == 'true'
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_MODEL: gpt-5.6-sol
-          EDITION_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.edition_mode || 'preopen' }}
+          EDITION_MODE: ${{ github.event_name == 'workflow_dispatch' && !inputs.automatic && inputs.edition_mode || 'preopen' }}
+          MEMO_VALIDATE_ONLY: ${{ inputs.dry_run && 'true' || 'false' }}
         run: python scripts/generate_memo.py
       - name: Build public site
         timeout-minutes: 1
-        if: steps.publish.outputs.required == 'true'
+        if: steps.publish.outputs.required == 'true' && !inputs.dry_run
         run: python scripts/build_site.py
+      - name: Check approved edition before publication
+        timeout-minutes: 1
+        if: steps.publish.outputs.required == 'true' && !inputs.dry_run
+        run: python scripts/verify_publication.py --local-only
       - name: Save successful memo
         timeout-minutes: 2
-        if: steps.publish.outputs.required == 'true' && (inputs.generate == true || github.event_name == 'schedule' || github.event_name == 'push')
+        if: steps.publish.outputs.generate_required == 'true' && !inputs.dry_run
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -124,14 +130,34 @@ jobs:
           git push
       - uses: actions/configure-pages@v5
         timeout-minutes: 2
-        if: steps.publish.outputs.required == 'true'
+        if: steps.publish.outputs.required == 'true' && !inputs.dry_run
       - uses: actions/upload-pages-artifact@v3
         timeout-minutes: 3
-        if: steps.publish.outputs.required == 'true'
+        if: steps.publish.outputs.required == 'true' && !inputs.dry_run
         with:
           path: docs
       - name: Deploy GitHub Pages
         timeout-minutes: 4
-        if: steps.publish.outputs.required == 'true'
+        if: steps.publish.outputs.required == 'true' && !inputs.dry_run
         id: deployment
         uses: actions/deploy-pages@v4
+      - name: Verify live public edition and quality receipt
+        timeout-minutes: 3
+        if: steps.publish.outputs.required == 'true' && !inputs.dry_run
+        run: python scripts/verify_publication.py
+      - name: Record dry-run outcome
+        if: inputs.dry_run && steps.publish.outputs.generate_required == 'true' && success()
+        run: echo "Dry run completed; candidate passed independent review. No changes committed or published." >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve generation audit
+        timeout-minutes: 2
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: memo-audit-${{ github.run_id }}-${{ github.run_attempt }}
+          # Contains public-source audit metadata only; public repo readers can download it.
+          path: |
+            artifacts/memo-audit.json
+            artifacts/memo-candidate.md
+            artifacts/publication-verification.json
+          if-no-files-found: ignore
+          retention-days: 14
