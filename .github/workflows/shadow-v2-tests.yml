@@ -1,0 +1,30 @@
+name: Shadow v2 isolation and tests
+on:
+  pull_request:
+    paths: ['shadow_v2/**', 'docs/v2/**', '.github/workflows/shadow-v2*.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: pip install -r shadow_v2/requirements.txt
+      - name: Install isolated PostgreSQL test runtime
+        run: npm ci --prefix shadow_v2 --ignore-scripts
+      - name: Verify unchanged v1 contracts
+        run: python -m unittest discover -s tests -q
+      - name: Verify v2 data, protocol and failure boundaries
+        run: python -m unittest discover -s shadow_v2/tests -p 'test_*.py' -q
+      - name: Verify reviewer copy and feedback behavior
+        run: node --test shadow_v2/tests/*.mjs

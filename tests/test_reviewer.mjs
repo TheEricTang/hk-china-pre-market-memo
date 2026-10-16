@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {richText,clipboardPayload,copyItems,reorder,FeedbackQueue,SavedLabels} from '../docs/v2/core.mjs';
+import {richText,clipboardPayload,copyItems,reorder,FeedbackQueue,SavedLabels,SelectionQueue,copyWithFeedback,restoreSelection} from '../docs/v2/core.mjs';
 test('copied paragraphs retain sources and chosen order, exclude UI',()=>{const x=[{id:'a',body:'**Alpha:** New fact. [[News](https://example.com/a)]'},{id:'b',body:'Beta: Other fact.'}];const p=clipboardPayload(reorder(x,'b',-1));assert.ok(p.plain.startsWith('Beta:'));assert.match(p.plain,/News \(https:\/\/example.com\/a\)/);assert.ok(p.html.includes('<strong>Alpha:</strong>'));assert.ok(!p.html.includes('Copy &'));});
 test('source and text cannot inject markup or javascript',()=>{const x=richText('<img onerror="bad"> [x](javascript:bad) [[safe](https://example.com/?a="b)]');assert.ok(!x.includes('<img'));assert.ok(!x.includes('href="javascript:'));assert.match(x,/&quot;/);});
 test('copy failure rejects before any downstream use action',async()=>{let marked=false;await assert.rejects(async()=>{await copyItems([{body:'x'}],{writeText:async()=>{throw Error('denied');}},undefined);marked=true;});assert.equal(marked,false);});
@@ -104,4 +104,57 @@ test('stale label reads and unavailable or wrong-edition responses never claim a
   assert.equal(labels.current,false);
   await labels.refresh(async()=>({edition:{id:'next'},labels:{i:'used'}}),'e');
   assert.equal(labels.current,false);
+});
+
+test('only successful copies produce positive feedback in chosen order',async()=>{
+  const calls=[]; const chosen=[{id:'b',body:'B'},{id:'a',body:'A'}];
+  const result=await copyWithFeedback(chosen,async items=>calls.push(['copy',items.map(i=>i.id)]),async items=>calls.push(['used',items.map(i=>i.id)]));
+  assert.deepEqual(calls,[['copy',['b','a']],['used',['b','a']]]);assert.equal(result.queued,true);
+  let recorded=false;await assert.rejects(copyWithFeedback(chosen,async()=>{throw Error('clipboard denied');},async()=>{recorded=true;}));assert.equal(recorded,false);
+});
+test('anonymous copies do not claim learning; feedback failure preserves copy success',async()=>{
+  assert.deepEqual(await copyWithFeedback([{body:'x'}],async()=>{}),{copied:true,queued:false});
+  const result=await copyWithFeedback([{body:'x'}],async()=>{},async()=>{throw Error('disk full');});
+  assert.equal(result.copied,true);assert.equal(result.queued,false);assert.equal(result.feedbackError,'disk full');
+});
+test('selection queue retains order and clear snapshots independently from labels',async()=>{
+  const shared=storage(), q=new SelectionQueue(shared,'selection');
+  const first={action:'selection',edition_id:'edition',selected_item_ids:['b','a'],client_event_id:'selection-one'};
+  q.add(first);q.add({...first,selected_item_ids:[],client_event_id:'selection-two'});
+  const replay=new SelectionQueue(shared,'selection');const sent=[];
+  await replay.flush(async e=>{sent.push(e.selected_item_ids);return{saved:true,client_event_id:e.client_event_id,selected_item_ids:e.selected_item_ids};});
+  assert.deepEqual(sent,[['b','a'],[]]);assert.equal(replay.events.length,0);
+  assert.throws(()=>q.add({...first,selected_item_ids:['a','a']}));
+});
+test('selection acknowledgement must confirm the identical ordered IDs',async()=>{
+  const q=new SelectionQueue(storage(),'selection');q.add({action:'selection',edition_id:'e',selected_item_ids:['b','a'],client_event_id:'x'});
+  await assert.rejects(q.flush(async e=>({saved:true,client_event_id:e.client_event_id,selected_item_ids:['a','b']})));
+  assert.equal(q.events.length,1);
+});
+
+test('restored saved selection preserves chosen copy order and unselected positions',()=>{
+  const items=['a','b','c','d'].map(id=>({id,body:id}));
+  const restored=restoreSelection(items,'e',['d','b']);
+  assert.deepEqual(restored.items.map(i=>i.id),['a','d','c','b']);
+  const selected=new Set(restored.selectedIds);
+  const chosen=restored.items.filter(i=>selected.has(i.id));
+  assert.equal(clipboardPayload(chosen).plain,'d\n\nb');
+  assert.deepEqual(chosen.map(i=>i.id),['d','b']);
+  assert.deepEqual(items.map(i=>i.id),['a','b','c','d']);
+});
+test('latest local selection overrides stale server selection including empty pending intent',()=>{
+  const items=['a','b','c'].map(id=>({id}));
+  const events=[
+    {edition_id:'e',selected_item_ids:['a']},
+    {edition_id:'e',selected_item_ids:['c','b']},
+    {edition_id:'other',selected_item_ids:['a']},
+  ];
+  let restored=restoreSelection(items,'e',['b','a'],events);
+  assert.deepEqual(restored.selectedIds,['c','b']);
+  assert.deepEqual(restored.items.filter(i=>restored.selectedIds.includes(i.id)).map(i=>i.id),['c','b']);
+  events.push({edition_id:'e',selected_item_ids:[]});
+  restored=restoreSelection(items,'e',['b','a'],events);
+  assert.deepEqual(restored.selectedIds,[]);
+  assert.deepEqual(restored.items,items);
+  assert.deepEqual(restoreSelection(items,'new',['c','missing','c'],events).selectedIds,['c']);
 });
