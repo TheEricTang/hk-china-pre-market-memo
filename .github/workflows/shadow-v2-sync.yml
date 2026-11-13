@@ -1,0 +1,56 @@
+name: HK China private reviewer refresh
+
+on:
+  workflow_run:
+    workflows: ['Daily HK China memo']
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hk-memo-v2-feedback-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    if: >-
+      vars.V2_FEEDBACK_ENABLED == 'true' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_branch == 'main' &&
+        github.event.workflow_run.head_repository.full_name == github.repository))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: hk-memo-v2-feedback
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install isolated dependencies
+        timeout-minutes: 3
+        run: pip install -r shadow_v2/requirements.txt
+      - name: Verify publication and refresh private reviewer
+        timeout-minutes: 2
+        env:
+          V2_BACKEND_URL: ${{ secrets.V2_BACKEND_URL }}
+          V2_CI_TOKEN: ${{ secrets.V2_CI_TOKEN }}
+        run: python -m shadow_v2.sync_public
+      - name: Incrementally index registered stories
+        timeout-minutes: 11
+        env:
+          V2_BACKEND_URL: ${{ secrets.V2_BACKEND_URL }}
+          V2_CI_TOKEN: ${{ secrets.V2_CI_TOKEN }}
+          V2_OPENAI_API_KEY: ${{ secrets.V2_OPENAI_API_KEY }}
+          V2_RATE_CARD: ${{ vars.V2_RATE_CARD }}
+          LANGCHAIN_TRACING_V2: 'false'
+          LANGSMITH_TRACING: 'false'
+        run: python -m shadow_v2.index_history --cloud --output-dir "$RUNNER_TEMP/hk-memo-v2-private-index" --max-items 200 --budget-usd 1
+      # Dedicated v2 project credentials/rate card only. No public artifacts or writes.
+      # An index failure never undoes registration, feedback, or v1 publication.
