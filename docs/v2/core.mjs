@@ -95,6 +95,9 @@ export class FeedbackQueue {
       throw new Error('Feedback could not be saved locally. Please try again.');
     }
   }
+  confirmed(event, response) {
+    return response.saved === true && response.client_event_id === event.client_event_id && response.label === event.label;
+  }
   async flush(send, onSaved = () => {}) {
     if (this.busy) return;
     this.busy = true;
@@ -102,8 +105,7 @@ export class FeedbackQueue {
       while (this.refresh().length) {
         const event = this.events[0];
         const response = await send(event);
-        if (response.saved !== true || response.client_event_id !== event.client_event_id
-            || response.label !== event.label) throw new Error('Feedback was not confirmed.');
+        if (!this.confirmed(event, response)) throw new Error('Feedback was not confirmed.');
         // Only this acknowledged UUID is removed. Another tab's additions remain intact.
         this.storage.removeItem(this.eventKey(event));
         this.refresh();
@@ -131,4 +133,40 @@ export class SavedLabels {
     this.values = payload.labels || {};
     this.current = true;
   }
+}
+
+// Selection snapshots are weaker evidence than successful copying; never a rejection.
+export class SelectionQueue extends FeedbackQueue {
+  valid(event) {
+    return event?.action === 'selection' && typeof event.edition_id === 'string'
+      && typeof event.client_event_id === 'string' && Array.isArray(event.selected_item_ids)
+      && event.selected_item_ids.length <= 100
+      && event.selected_item_ids.every(id => typeof id === 'string')
+      && new Set(event.selected_item_ids).size === event.selected_item_ids.length;
+  }
+  confirmed(event, response) {
+    return response.saved === true && response.client_event_id === event.client_event_id
+      && JSON.stringify(response.selected_item_ids) === JSON.stringify(event.selected_item_ids);
+  }
+}
+export async function copyWithFeedback(items, copy = copyItems, record = null) {
+  // Clipboard success is the prerequisite. Never mark a failed copy as useful.
+  await copy(items);
+  if (!record) return {copied: true, queued: false};
+  try { await record(items); return {copied: true, queued: true}; }
+  catch (error) { return {copied: true, queued: false, feedbackError: error.message}; }
+}
+
+// Pending local intent is newer than the last server snapshot, including an empty selection.
+export function restoreSelection(items, editionId, savedIds = [], pendingEvents = []) {
+  const pending = pendingEvents.filter(event => event.edition_id === editionId).at(-1);
+  const snapshot = pending ? pending.selected_item_ids : savedIds;
+  const byId = new Map(items.map(item => [item.id, item]));
+  const selectedIds = [...new Set(snapshot)].filter(id => byId.has(id));
+  const selected = new Set(selectedIds);
+  const ordered = selectedIds.map(id => byId.get(id));
+  let index = 0;
+  // Preserve unselected story positions while restoring selected relative order.
+  const restored = items.map(item => selected.has(item.id) ? ordered[index++] : item);
+  return {items: restored, selectedIds};
 }
