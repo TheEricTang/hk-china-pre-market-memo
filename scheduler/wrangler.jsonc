@@ -1,0 +1,10 @@
+{
+  "name": "hk-china-memo-delivery",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-09-16",
+  "workers_dev": false,
+  "preview_urls": false,
+  "vars": { "ENABLED": "false" },
+  "triggers": { "crons": ["35-59/5 22 * * *", "*/5 23 * * *"] },
+  "observability": { "enabled": true, "head_sampling_rate": 1 }
+}
